@@ -211,6 +211,13 @@ pub fn convert_with_python(
         let stop = heartbeat_stop.clone();
         std::thread::spawn(move || {
             let start = std::time::Instant::now();
+            // Emit one liveness tick immediately, before the first sleep, so a
+            // progress event is guaranteed the moment the (opaque) subprocess
+            // starts — independent of thread-scheduler timing. Without this a
+            // fast subprocess on a loaded runner can finish and set `stop`
+            // before the heartbeat thread's first periodic emit, producing zero
+            // liveness events (a flaky-test source).
+            cb.report(crate::Progress::msg("python", "Python engine running… 0s elapsed"));
             loop {
                 // Sleep in short slices so we stop promptly when done.
                 for _ in 0..20 {

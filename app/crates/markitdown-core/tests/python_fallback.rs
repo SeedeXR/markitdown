@@ -235,9 +235,12 @@ fn py_args_env_is_appended() {
 #[test]
 fn python_engine_emits_heartbeat_progress() {
     let _g = guard();
-    // A slow stub (sleeps past one heartbeat interval) + a progress sink: the
-    // opaque subprocess must still produce liveness ("…s elapsed") events.
-    let stub = stub_engine("slow.sh", "sleep 3; echo DONE");
+    // A stub that runs briefly + a progress sink: the opaque subprocess must
+    // produce a liveness ("…s elapsed") event. The engine emits an immediate
+    // tick when it spawns the subprocess, so this is deterministic regardless
+    // of how the heartbeat thread is scheduled on a loaded CI runner (it does
+    // not depend on the sleep crossing the periodic-heartbeat interval).
+    let stub = stub_engine("slow.sh", "sleep 1; echo DONE");
     let events = Arc::new(Mutex::new(Vec::<String>::new()));
     let sink = events.clone();
     let md = MarkItDown::with_options(ConvertOptions {

@@ -159,6 +159,16 @@ app, and the optional Python fallback). Format loosely follows
 ### Changed
 - CLI default engine is `auto` (transparent Python fallback when configured).
 
+### Fixed
+- **Python-engine heartbeat is now emitted immediately** when the subprocess
+  starts (a `Python engine running… 0s elapsed` tick) instead of only after the
+  first ~2s sleep slice. This removes a thread-scheduling race where a fast
+  subprocess on a loaded CI runner could finish before the heartbeat thread's
+  first periodic emit, producing zero liveness events — which intermittently
+  failed `python_engine_emits_heartbeat_progress` (seen on the macOS x86_64
+  runner; the same code path covers aarch64). The test no longer depends on the
+  stub sleep crossing the heartbeat interval.
+
 ## Earlier
 
 - Initial Rust suite: pure-Rust engine with 18 converters; `markitdown` CLI
