@@ -7,7 +7,7 @@
 #   Linux   x86_64  (ubuntu-22.04)
 #   Linux   aarch64 (ubuntu-24.04-arm — GitHub-hosted Arm64 runner)
 #   Windows x86_64  (windows-latest)
-#   macOS   x86_64  Intel         (macos-13)
+#   macOS   x86_64  Intel         (built on macos-14 via Rosetta)
 #   macOS   aarch64 Apple Silicon (macos-14)
 #
 # Trigger: push a tag like `app-v0.1.0` (kept distinct from the Python
@@ -298,13 +298,15 @@ jobs:
   # packaged for EVERY OS/arch so `--engine auto`/`python` works without users
   # building it. Covers Linux x86_64/aarch64, Windows x86_64, and macOS Apple
   # Silicon + Intel. PyInstaller cannot cross-compile, so each arch builds on
-  # its own native runner (Intel macOS uses the scarce `macos-13` image).
+  # its own native runner — EXCEPT Intel macOS, which is built on the Apple
+  # Silicon `macos-14` runner under Rosetta (the scarce/queue-forever `macos-13`
+  # image is avoided entirely; every macOS job runs on macos-14).
   #
   # Robustness: this job `needs: release` and runs AFTER the main release is
   # already published, then APPENDS each binary to that release. Combined with
-  # `continue-on-error`, a flaky or slow runner (e.g. a queued macos-13) can
-  # NEVER block or delay the Rust/desktop release — the Python asset simply
-  # shows up late, or not at all for that one arch.
+  # `continue-on-error`, a flaky or slow runner can NEVER block or delay the
+  # Rust/desktop release — the Python asset simply shows up late, or not at all
+  # for that one arch.
   python-engine:
     name: python fallback (${{ matrix.label }})
     needs: release
@@ -317,11 +319,18 @@ jobs:
           - { os: ubuntu-24.04-arm, label: linux-aarch64 }
           - { os: windows-latest, label: windows-x86_64 }
           - { os: macos-14, label: macos-aarch64 }
-          - { os: macos-13, label: macos-x86_64 } # Intel; runner may be scarce
+          # Intel macOS: built on the Apple-Silicon macos-14 runner under
+          # Rosetta with a universal2 Python, so it produces a genuine x86_64
+          # binary without depending on the scarce macos-13 image.
+          - { os: macos-14, label: macos-x86_64, intel: true }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      # Standard interpreter for every entry EXCEPT the Intel-macOS one (which
+      # needs a universal2 Python installed below so it can build x86_64).
       - uses: actions/setup-python@v5
+        if: ${{ !matrix.intel }}
         with:
           # 3.12: a supported version with prebuilt wheels for markitdown[all]'s
           # native deps (magika/onnxruntime, lxml, numpy). MUST stay within the
@@ -329,12 +338,34 @@ jobs:
           # matches that script's preferred default so local and CI builds agree.
           python-version: "3.12"
 
+      # Intel macOS on the arm64 runner: PyInstaller can't cross-compile, so we
+      # build the WHOLE thing under Rosetta. `arch -x86_64` sets an architecture
+      # preference that macOS inherits down the entire process tree (venv python,
+      # pip, PyInstaller); with a *universal2* python.org interpreter that means
+      # pip pulls x86_64 wheels and PyInstaller emits an x86_64 binary.
+      - name: Install Rosetta 2 + universal2 Python (Intel macOS target)
+        if: matrix.intel
+        run: |
+          set -euo pipefail
+          softwareupdate --install-rosetta --agree-to-license
+          # python.org ships universal2 builds (GitHub's setup-python is arm64
+          # only on this runner). Pinned within the 3.10–3.13 range the build
+          # script enforces; bump the patch as needed.
+          PYVER=3.12.8
+          curl -fsSLo /tmp/python-universal2.pkg \
+            "https://www.python.org/ftp/python/${PYVER}/python-${PYVER}-macos11.pkg"
+          sudo installer -pkg /tmp/python-universal2.pkg -target /
+          echo "MARKITDOWN_PY_INTERP=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12" >> "$GITHUB_ENV"
+
       - name: Build the PyInstaller fallback binary
         shell: bash
         run: |
           set -euo pipefail
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             pwsh app/python-engine/build_binary.ps1
+          elif [[ "${{ matrix.intel }}" == "true" ]]; then
+            # Whole build under Rosetta with the universal2 interpreter → x86_64.
+            PYTHON="$MARKITDOWN_PY_INTERP" arch -x86_64 bash app/python-engine/build_binary.sh
           else
             bash app/python-engine/build_binary.sh
           fi
@@ -349,8 +380,11 @@ jobs:
           DIR="app/python-engine/dist/markitdown-py"
           PY="$DIR/markitdown-py$EXE"
           test -x "$PY" || { echo "::error::fallback engine not produced at $PY"; exit 1; }
+          # Intel binary on the arm64 runner runs via Rosetta; force x86_64 so
+          # the smoke test exercises exactly the bytes we ship.
+          RUN=""; [[ "${{ matrix.intel }}" == "true" ]] && RUN="arch -x86_64"
           # It must actually convert a real document.
-          "$PY" packages/markitdown/tests/test_files/test.docx > py_out.md
+          $RUN "$PY" packages/markitdown/tests/test_files/test.docx > py_out.md
           grep -q AutoGen py_out.md
           mkdir -p out
           # Archive the whole folder (onedir must travel together). Users extract
