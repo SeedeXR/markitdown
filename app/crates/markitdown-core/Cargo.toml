@@ -11,9 +11,20 @@ default = ["net"]
 # URL fetching (http/https inputs, Wikipedia/Bing/YouTube live pages).
 # Disable for a fully offline build: cargo build --no-default-features
 net = ["dep:ureq"]
+# Optional fast PDF backend: Google PDFium (loaded as a dynamic library at
+# runtime). ~20x faster than the pure-Rust path on large PDFs. Off by default —
+# enabling it pulls a C library that must be present at runtime
+# (MARKITDOWN_PDFIUM_LIB / next to the binary / system). Build with:
+#   cargo build --features pdfium
+pdfium = ["dep:pdfium-render"]
 
 [dependencies]
 pdf-extract = { workspace = true }
+# Not used directly — declared so Cargo feature-unification turns ON lopdf's
+# `rayon` feature for the lopdf that pdf-extract uses (pdf-extract pulls it with
+# default-features=false, which disables rayon). This parallelizes PDF object
+# parsing across cores: ~3x faster load on large PDFs (57s -> ~20s end-to-end).
+lopdf = { workspace = true }
 calamine = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
@@ -24,6 +35,7 @@ imagesize = { workspace = true }
 lofty = { workspace = true }
 msg_parser = { workspace = true }
 csv = { workspace = true }
+mobi = { workspace = true }
 chardetng = { workspace = true }
 encoding_rs = { workspace = true }
 file-format = { workspace = true }
@@ -32,4 +44,6 @@ percent-encoding = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+rayon = { workspace = true }
 ureq = { workspace = true, optional = true }
+pdfium-render = { workspace = true, optional = true }

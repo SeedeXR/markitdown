@@ -22,6 +22,15 @@ interface JobUpdate {
   duration_ms?: number | null;
 }
 
+/** Live conversion progress emitted repeatedly while a job is converting. */
+interface JobProgress {
+  id: string;
+  phase: string;
+  message: string;
+  /** 0–100, only present for per-page PDF steps. */
+  percent?: number | null;
+}
+
 interface FormatInfo {
   name: string;
   extensions: string[];
@@ -80,6 +89,10 @@ interface Job {
   engine: EngineChoice;
   /** True once the user has edited the raw markdown in the preview. */
   edited: boolean;
+  /** Latest progress percent (0–100) while converting; null until a per-page step reports one. */
+  progressPercent: number | null;
+  /** Latest human progress message while converting; null when none received yet. */
+  progressMessage: string | null;
 }
 
 type Filter = "all" | "done" | "failed";
@@ -100,6 +113,8 @@ let llmConfig: LlmConfig = emptyLlmConfig();
 let llmProviders: LlmProviderInfo[] = [];
 /** Currently selected provider id (persisted alongside llmConfig). */
 let llmProviderId = "";
+/** Path to a user-supplied `markitdown-py` binary (empty until configured). */
+let pythonBin = "";
 
 // ---- DOM refs ----
 
@@ -151,6 +166,10 @@ const llmApiKeyInput = $<HTMLInputElement>("llm-api-key");
 const llmPromptInput = $<HTMLTextAreaElement>("llm-prompt");
 const settingsStatus = $("settings-status");
 const settingsStatusText = $("settings-status-text");
+const pyBinInput = $<HTMLInputElement>("py-bin");
+const pyBinBrowseBtn = $<HTMLButtonElement>("py-bin-browse");
+const pyStatus = $("py-status");
+const pyStatusText = $("py-status-text");
 
 // ---- Helpers ----
 
@@ -184,6 +203,7 @@ function formatDuration(ms: number): string {
 
 const LLM_KEY = "llmConfig";
 const LLM_PROVIDER_KEY = "llmProvider";
+const PYTHON_BIN_KEY = "pythonBin";
 
 function emptyLlmConfig(): LlmConfig {
   return { api_base: "", api_key: "", model: "", prompt: "" };
@@ -210,12 +230,16 @@ function loadLlmConfig(): void {
   // {api_base, api_key, model, prompt} shape.
   const storedProvider = localStorage.getItem(LLM_PROVIDER_KEY);
   if (typeof storedProvider === "string") llmProviderId = storedProvider;
+  // Python engine binary path is stored independently of the LLM block.
+  const storedPyBin = localStorage.getItem(PYTHON_BIN_KEY);
+  if (typeof storedPyBin === "string") pythonBin = storedPyBin;
 }
 
 function persistLlmConfig(): void {
   try {
     localStorage.setItem(LLM_KEY, JSON.stringify(llmConfig));
     localStorage.setItem(LLM_PROVIDER_KEY, llmProviderId);
+    localStorage.setItem(PYTHON_BIN_KEY, pythonBin);
   } catch {
     /* quota / unavailable — best effort */
   }
@@ -237,6 +261,25 @@ function llmPayload(): LlmConfig | undefined {
     };
   }
   return undefined;
+}
+
+/**
+ * The `python_bin` value to send with a conversion / capabilities call, or
+ * `undefined` when no path is configured (so the backend falls back to the
+ * `MARKITDOWN_PY_BIN` environment variable).
+ */
+function pythonBinPayload(): string | undefined {
+  const p = pythonBin.trim();
+  return p ? p : undefined;
+}
+
+/**
+ * Build the common per-job request fields (engine + llm + python_bin) shared by
+ * the initial enqueue and Retry, so every conversion path carries the same
+ * settings.
+ */
+function requestExtras(engineChoice: EngineChoice) {
+  return { engine: engineChoice, llm: llmPayload(), python_bin: pythonBinPayload() };
 }
 
 // ---- Logs (persisted to localStorage, capped at 500 lines) ----
@@ -350,6 +393,19 @@ function durationText(job: Job): string {
   return "";
 }
 
+/**
+ * Live progress label for a converting job, e.g. `45% · page 160/356`, or just
+ * the message when no percent, or "" when no progress has been received yet.
+ */
+function progressLabel(job: Job): string {
+  const msg = job.progressMessage;
+  if (job.progressPercent != null) {
+    const pct = Math.round(Math.max(0, Math.min(100, job.progressPercent)));
+    return msg ? `${pct}% · ${msg}` : `${pct}%`;
+  }
+  return msg ?? "";
+}
+
 function jobMatchesFilter(job: Job): boolean {
   if (filter === "done") return job.status === "done";
   if (filter === "failed") return job.status === "failed";
@@ -390,10 +446,19 @@ function renderQueue(): void {
           job.error,
         )}</span>`
       : "";
-    const progress =
-      job.status === "converting"
-        ? `<div class="job-progress" role="progressbar" aria-label="Converting"><div class="job-progress-bar"></div></div>`
+    let progress = "";
+    if (job.status === "converting") {
+      const hasPct = job.progressPercent != null;
+      const pct = hasPct ? Math.max(0, Math.min(100, job.progressPercent!)) : 0;
+      const barClass = hasPct ? "job-progress-bar is-determinate" : "job-progress-bar";
+      const barStyle = hasPct ? ` style="width: ${pct}%"` : "";
+      const ariaNow = hasPct ? ` aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"` : "";
+      const label = progressLabel(job);
+      const labelPart = label
+        ? `<span class="job-progress-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`
         : "";
+      progress = `<div class="job-progress" role="progressbar" aria-label="Converting"${ariaNow}><div class="${barClass}"${barStyle}></div></div>${labelPart}`;
+    }
 
     const actions: string[] = [];
     if (job.status === "done") {
@@ -598,9 +663,11 @@ async function enqueue(paths: string[]): Promise<void> {
       startedAt: null,
       engine,
       edited: false,
+      progressPercent: null,
+      progressMessage: null,
     });
     log("info", `Queued ${name} (engine: ${engine})`);
-    return { id, path, engine, llm: llmPayload() };
+    return { id, path, ...requestExtras(engine) };
   });
   renderQueue();
   syncTicker();
@@ -624,6 +691,8 @@ async function retry(id: string): Promise<void> {
   job.durationMs = null;
   job.startedAt = null;
   job.edited = false;
+  job.progressPercent = null;
+  job.progressMessage = null;
   if (selectedId === id) {
     selectedId = null;
     renderPreview();
@@ -633,7 +702,7 @@ async function retry(id: string): Promise<void> {
   syncTicker();
   try {
     await invoke("convert_files", {
-      requests: [{ id: job.id, path: job.path, engine: job.engine, llm: llmPayload() }],
+      requests: [{ id: job.id, path: job.path, ...requestExtras(job.engine) }],
     });
   } catch (e) {
     console.error("convert_files (retry) failed", e);
@@ -672,9 +741,16 @@ function applyUpdate(u: JobUpdate): void {
   if (u.status === "converting") {
     job.startedAt = Date.now();
   }
+  if (u.status === "converting") {
+    // Entering convert resets any stale progress from a previous attempt.
+    job.progressPercent = null;
+    job.progressMessage = null;
+  }
   if (u.status === "done" || u.status === "failed") {
     if (u.duration_ms != null) job.durationMs = u.duration_ms;
     job.startedAt = null;
+    job.progressPercent = null;
+    job.progressMessage = null;
   }
   // Log lifecycle transitions once per real change.
   if (prev !== u.status) {
@@ -688,6 +764,66 @@ function applyUpdate(u: JobUpdate): void {
   renderQueue();
   syncTicker();
   if (job.id === selectedId) renderPreview();
+}
+
+/**
+ * Apply a live progress event: stash the latest percent/message on the job,
+ * append a timestamped log line, and update just this row's bar + label so the
+ * converting row visibly moves without a full re-render.
+ */
+function applyProgress(p: JobProgress): void {
+  const job = jobs.get(p.id);
+  if (!job) return;
+  const percent = typeof p.percent === "number" ? p.percent : null;
+  job.progressPercent = percent;
+  job.progressMessage = p.message || null;
+
+  // Log every (already-throttled) event with file name, phase and percent.
+  const pctTag = percent != null ? ` ${Math.round(percent)}%` : "";
+  log("info", `${job.name}  [${p.phase}${pctTag}] ${p.message}`);
+
+  // Only the converting row needs touching; patch it in place to stay cheap.
+  if (job.status === "converting" && !viewQueueEl.hidden) {
+    patchProgressRow(job);
+  }
+}
+
+/** In-place update of a converting row's progress bar + live label. */
+function patchProgressRow(job: Job): void {
+  const row = queueEl.querySelector<HTMLElement>(
+    `.job[data-id="${CSS.escape(job.id)}"]`,
+  );
+  if (!row) return;
+  const wrap = row.querySelector<HTMLElement>(".job-progress");
+  const bar = row.querySelector<HTMLElement>(".job-progress-bar");
+  if (wrap && bar) {
+    if (job.progressPercent != null) {
+      const pct = Math.max(0, Math.min(100, job.progressPercent));
+      bar.classList.add("is-determinate");
+      bar.style.width = `${pct}%`;
+      wrap.setAttribute("aria-valuenow", String(Math.round(pct)));
+      wrap.setAttribute("aria-valuemin", "0");
+      wrap.setAttribute("aria-valuemax", "100");
+    } else {
+      bar.classList.remove("is-determinate");
+      bar.style.width = "";
+      wrap.removeAttribute("aria-valuenow");
+    }
+  }
+  const label = progressLabel(job);
+  let labelEl = row.querySelector<HTMLElement>(".job-progress-label");
+  if (label) {
+    if (!labelEl) {
+      labelEl = document.createElement("span");
+      labelEl.className = "job-progress-label";
+      // The label lives as a sibling right after the progress bar wrapper.
+      wrap?.after(labelEl);
+    }
+    labelEl.textContent = label;
+    labelEl.title = label;
+  } else if (labelEl) {
+    labelEl.remove();
+  }
 }
 
 // ---- Theme ----
@@ -720,6 +856,9 @@ function setEngine(value: string): void {
   engine = value === "rust" || value === "python" ? value : "auto";
   engineSelect.value = engine;
   localStorage.setItem("engine", engine);
+  // Refresh the capability pills so the "python selected but no binary" inline
+  // warning appears/clears as the user switches engines.
+  void loadCapabilities(true);
 }
 
 // ---- Sidebar tab (Queue / Logs) ----
@@ -767,13 +906,16 @@ async function loadCapabilities(quiet = false): Promise<void> {
     // Fold the current UI settings into the report so the LLM badge reflects
     // configured-in-app captions, not just environment variables. The command
     // returns model + api_base but, by design of the core type, never the key.
-    const caps = await invoke<Capabilities>("capabilities", { llm: llmPayload() ?? null });
+    const caps = await invoke<Capabilities>("capabilities", {
+      llm: llmPayload() ?? null,
+      pythonBin: pythonBinPayload() ?? null,
+    });
     setCap(
       "cap-python",
       caps.python_engine,
       caps.python_engine
         ? `Python engine available${caps.python_engine_path ? ` (${caps.python_engine_path})` : ""}`
-        : "Python engine not configured — set MARKITDOWN_PY_BIN to a markitdown binary",
+        : "Python engine not configured — set its binary path in Settings (or MARKITDOWN_PY_BIN)",
     );
     const llmTip = caps.llm_captions
       ? `LLM image captions active — ${caps.llm_model ?? "model"} @ ${
@@ -798,12 +940,26 @@ async function loadCapabilities(quiet = false): Promise<void> {
   }
 }
 
-/** Reflect live caption status inside the settings modal (never the key). */
+/** Reflect live caption + Python engine status inside the settings modal. */
 function updateSettingsStatus(caps: Capabilities): void {
   settingsStatus.dataset.on = caps.llm_captions ? "true" : "false";
   settingsStatusText.textContent = caps.llm_captions
     ? `Captions on — ${caps.llm_model ?? "model"} @ ${caps.llm_api_base ?? "endpoint"}`
     : "Captions off";
+  // Python engine pill: show availability + the resolved path (no secrets).
+  pyStatus.dataset.on = caps.python_engine ? "true" : "false";
+  if (caps.python_engine) {
+    pyStatusText.textContent = caps.python_engine_path
+      ? `Python engine available — ${caps.python_engine_path}`
+      : "Python engine available";
+  } else if (pythonBin.trim()) {
+    // A path is set but the binary didn't resolve — warn inline.
+    pyStatusText.textContent = "Python engine unavailable — binary not found at that path";
+  } else if (engine === "python") {
+    pyStatusText.textContent = "Python engine selected but no binary set — set its path above";
+  } else {
+    pyStatusText.textContent = "Python engine off";
+  }
 }
 
 function setCap(id: string, on: boolean, tooltip: string): void {
@@ -888,6 +1044,7 @@ function syncSettingsForm(): void {
   llmModelInput.value = llmConfig.model;
   llmApiKeyInput.value = llmConfig.api_key;
   llmPromptInput.value = llmConfig.prompt;
+  pyBinInput.value = pythonBin;
   syncProviderUI();
 }
 
@@ -914,6 +1071,7 @@ function saveSettings(): void {
     prompt: llmPromptInput.value.trim(),
   };
   llmProviderId = llmProviderSelect.value;
+  pythonBin = pyBinInput.value.trim();
   persistLlmConfig();
   // Log status without ever echoing the key.
   const active = llmPayload() !== undefined;
@@ -923,15 +1081,20 @@ function saveSettings(): void {
       ? `LLM captions configured — ${llmConfig.model} @ ${llmConfig.api_base}`
       : "LLM captions cleared/incomplete — captions off",
   );
+  log(
+    "info",
+    pythonBin ? `Python engine binary set — ${pythonBin}` : "Python engine binary cleared",
+  );
   void loadCapabilities(true);
 }
 
 function clearSettings(): void {
   llmConfig = emptyLlmConfig();
   llmProviderId = "";
+  pythonBin = "";
   persistLlmConfig();
   syncSettingsForm();
-  log("info", "LLM caption settings cleared");
+  log("info", "Settings cleared (LLM captions + Python engine)");
   void loadCapabilities(true);
 }
 
@@ -953,6 +1116,20 @@ function initSettings(): void {
   llmProviderSelect.addEventListener("change", () =>
     onProviderChange(llmProviderSelect.value),
   );
+  pyBinBrowseBtn.addEventListener("click", () => {
+    void browseForPythonBin();
+  });
+}
+
+/** Pick a Python engine binary via the dialog plugin and fill the field. */
+async function browseForPythonBin(): Promise<void> {
+  try {
+    const selection = await open({ multiple: false, directory: false });
+    if (typeof selection === "string") pyBinInput.value = selection;
+  } catch (e) {
+    console.error("python binary picker failed", e);
+    log("err", `python binary picker failed: ${String(e)}`);
+  }
 }
 
 // ---- Wire up events ----
@@ -1102,6 +1279,8 @@ function flash(btn: HTMLButtonElement): void {
 
 // Listen for per-job updates emitted from Rust.
 getCurrentWebviewWindow().listen<JobUpdate>("job:update", (e) => applyUpdate(e.payload));
+// Listen for live conversion progress (page counts, phase transitions, …).
+getCurrentWebviewWindow().listen<JobProgress>("job:progress", (e) => applyProgress(e.payload));
 
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", init);

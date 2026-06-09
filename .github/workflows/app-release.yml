@@ -73,16 +73,19 @@ jobs:
             target: x86_64-unknown-linux-gnu
             bundles: deb,appimage
             compress: true
+            pdfium_asset: pdfium-linux-x64
           - os: ubuntu-24.04-arm
             label: linux-aarch64
             target: aarch64-unknown-linux-gnu
             bundles: deb
             compress: true
+            pdfium_asset: pdfium-linux-arm64
           - os: windows-latest
             label: windows-x86_64
             target: x86_64-pc-windows-msvc
             bundles: msi,nsis
             compress: true
+            pdfium_asset: pdfium-win-x64
           # macOS x86_64 (Intel artifacts): CROSS-COMPILED on the Apple
           # Silicon runner instead of the Intel `macos-13` runner. Intel
           # macOS hosted runners are scarce / being phased down and jobs can
@@ -95,13 +98,39 @@ jobs:
             bundles: app,dmg
             compress: false
             rosetta: true
+            pdfium_asset: pdfium-mac-x64
           - os: macos-14
             label: macos-aarch64
             target: aarch64-apple-darwin
             bundles: app,dmg
             compress: false
+            pdfium_asset: pdfium-mac-arm64
     steps:
       - uses: actions/checkout@v4
+
+      # Download the PDFium shared library matching the TARGET arch (not the
+      # runner — macOS x86_64 is cross-built on the arm64 runner). Staged into
+      # the desktop's Tauri resources and exported for the CLI/MCP build + smoke.
+      - name: Download + stage PDFium (fast PDF backend)
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/bblanchon/pdfium-binaries/releases/latest/download/${{ matrix.pdfium_asset }}.tgz"
+          curl -fsSL -o pdfium.tgz "$url"
+          mkdir -p pdfium_extract && tar xzf pdfium.tgz -C pdfium_extract
+          case "$RUNNER_OS" in
+            Windows) src="pdfium_extract/bin/pdfium.dll";      libname="pdfium.dll" ;;
+            macOS)   src="pdfium_extract/lib/libpdfium.dylib"; libname="libpdfium.dylib" ;;
+            *)       src="pdfium_extract/lib/libpdfium.so";    libname="libpdfium.so" ;;
+          esac
+          test -f "$src" || { echo "::error::PDFium lib not found at $src"; exit 1; }
+          # Bundle into the desktop app (Tauri resource glob pdfium/*).
+          mkdir -p app/desktop/src-tauri/pdfium
+          cp "$src" "app/desktop/src-tauri/pdfium/$libname"
+          # Export for later steps (CLI/MCP build, smoke, packaging).
+          echo "PDFIUM_LIB=$PWD/$src" >> "$GITHUB_ENV"
+          echo "PDFIUM_LIBNAME=$libname" >> "$GITHUB_ENV"
+          echo "staged PDFium ($libname) for ${{ matrix.label }}"
 
       - name: Install Tauri system dependencies (Linux only)
         if: runner.os == 'Linux'
@@ -140,9 +169,9 @@ jobs:
         run: cargo test --locked
 
       # ---- build standalone CLI + MCP (release, native target) ------------
-      - name: Build CLI + MCP (release)
+      - name: Build CLI + MCP (release, with PDFium)
         working-directory: app
-        run: cargo build --release --locked --target ${{ matrix.target }} -p markitdown-cli -p markitdown-mcp
+        run: cargo build --release --locked --features pdfium --target ${{ matrix.target }} -p markitdown-cli -p markitdown-mcp
 
       # ---- compress the standalone binaries (UPX) -------------------------
       # The release profile already does LTO + strip + opt-level="s". UPX
@@ -182,7 +211,9 @@ jobs:
       # empty or errors, and asserts a non-format binary is still rejected.
       - name: Smoke + format-regression test on the released binary
         shell: bash
-        run: BIN="app/target/${{ matrix.target }}/release" bash .github/scripts/smoke.sh "${{ matrix.label }}"
+        # MARKITDOWN_PDFIUM_LIB makes the smoke exercise the bundled PDFium
+        # backend (and proves it loads on this OS/arch).
+        run: MARKITDOWN_PDFIUM_LIB="$PDFIUM_LIB" BIN="app/target/${{ matrix.target }}/release" bash .github/scripts/smoke.sh "${{ matrix.label }}"
 
       # ---- install frontend deps + build the Tauri desktop installers -----
       - name: Install frontend dependencies
@@ -205,12 +236,15 @@ jobs:
           mkdir -p out staging
           cp "app/target/$TRIPLE/release/markitdown$EXE" staging/
           cp "app/target/$TRIPLE/release/markitdown-mcp$EXE" staging/
+          # Bundle the PDFium library next to the binaries so the fast PDF
+          # backend is auto-discovered (next-to-exe). Keep them together.
+          cp "$PDFIUM_LIB" "staging/$PDFIUM_LIBNAME"
           (
             cd staging
             if [[ "$RUNNER_OS" == "Windows" ]]; then
-              7z a "../out/markitdown-cli-mcp-$LABEL.zip" "markitdown$EXE" "markitdown-mcp$EXE"
+              7z a "../out/markitdown-cli-mcp-$LABEL.zip" "markitdown$EXE" "markitdown-mcp$EXE" "$PDFIUM_LIBNAME"
             else
-              tar czf "../out/markitdown-cli-mcp-$LABEL.tar.gz" markitdown markitdown-mcp
+              tar czf "../out/markitdown-cli-mcp-$LABEL.tar.gz" markitdown markitdown-mcp "$PDFIUM_LIBNAME"
             fi
           )
           # Desktop installers (only the types that exist for this platform).
@@ -254,14 +288,19 @@ jobs:
           if-no-files-found: error
 
   # OPTIONAL Python fallback engine (OCR, transcription, Azure, plugins),
-  # packaged so users can enable `--engine auto` fallback without building it
-  # themselves. Best-effort: the whole job is `continue-on-error` so a flaky
-  # PyInstaller build NEVER blocks the lightweight Rust release. PyInstaller
-  # cannot cross-compile, so this covers the 4 natively-buildable targets;
-  # Intel macOS users build locally with python-engine/build_binary.sh (an
-  # Apple-Silicon Python binary can't run on Intel).
+  # packaged for EVERY OS/arch so `--engine auto`/`python` works without users
+  # building it. Covers Linux x86_64/aarch64, Windows x86_64, and macOS Apple
+  # Silicon + Intel. PyInstaller cannot cross-compile, so each arch builds on
+  # its own native runner (Intel macOS uses the scarce `macos-13` image).
+  #
+  # Robustness: this job `needs: release` and runs AFTER the main release is
+  # already published, then APPENDS each binary to that release. Combined with
+  # `continue-on-error`, a flaky or slow runner (e.g. a queued macos-13) can
+  # NEVER block or delay the Rust/desktop release — the Python asset simply
+  # shows up late, or not at all for that one arch.
   python-engine:
     name: python fallback (${{ matrix.label }})
+    needs: release
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -271,11 +310,16 @@ jobs:
           - { os: ubuntu-24.04-arm, label: linux-aarch64 }
           - { os: windows-latest, label: windows-x86_64 }
           - { os: macos-14, label: macos-aarch64 }
+          - { os: macos-13, label: macos-x86_64 } # Intel; runner may be scarce
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
+          # 3.12: a supported version with prebuilt wheels for markitdown[all]'s
+          # native deps (magika/onnxruntime, lxml, numpy). MUST stay within the
+          # 3.10–3.13 range enforced by app/python-engine/build_binary.sh, and
+          # matches that script's preferred default so local and CI builds agree.
           python-version: "3.12"
 
       - name: Build the PyInstaller fallback binary
@@ -288,36 +332,44 @@ jobs:
             bash app/python-engine/build_binary.sh
           fi
 
-      - name: Smoke test + stage the fallback binary
+      - name: Smoke test + archive the fallback engine (onedir)
         shell: bash
         run: |
           set -euo pipefail
           EXE=""; [[ "$RUNNER_OS" == "Windows" ]] && EXE=".exe"
-          PY="app/python-engine/dist/markitdown-py$EXE"
-          test -f "$PY" || { echo "::error::fallback binary not produced"; exit 1; }
+          # build_binary defaults to onedir: a folder at dist/markitdown-py/
+          # whose launcher is dist/markitdown-py/markitdown-py[.exe].
+          DIR="app/python-engine/dist/markitdown-py"
+          PY="$DIR/markitdown-py$EXE"
+          test -x "$PY" || { echo "::error::fallback engine not produced at $PY"; exit 1; }
           # It must actually convert a real document.
           "$PY" packages/markitdown/tests/test_files/test.docx > py_out.md
           grep -q AutoGen py_out.md
           mkdir -p out
-          cp "$PY" "out/markitdown-py-${{ matrix.label }}$EXE"
-          echo "fallback engine OK on ${{ matrix.label }} ($(du -h "$PY" | cut -f1))"
+          # Archive the whole folder (onedir must travel together). Users extract
+          # and point at the inner markitdown-py[.exe].
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            (cd app/python-engine/dist && 7z a "$GITHUB_WORKSPACE/out/markitdown-py-${{ matrix.label }}.zip" markitdown-py >/dev/null)
+          else
+            tar czf "out/markitdown-py-${{ matrix.label }}.tar.gz" -C app/python-engine/dist markitdown-py
+          fi
+          echo "fallback engine OK on ${{ matrix.label }} ($(du -sh "$DIR" | cut -f1))"
 
-      - name: Upload fallback binary
-        uses: actions/upload-artifact@v4
+      - name: Append the fallback engine to the release
+        uses: softprops/action-gh-release@v2
         with:
-          name: markitdown-py-${{ matrix.label }}
-          path: out/*
-          if-no-files-found: error
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          files: out/markitdown-py-${{ matrix.label }}.*
+          fail_on_unmatched_files: true
 
-  # Gather every platform's artifacts and publish them as ONE GitHub Release.
-  # Runs both for `app-v*` tag pushes (normal release) AND for manual
-  # workflow_dispatch runs (publishes a prerelease named by the `tag` input),
-  # so the .dmg / installers / binaries are always visible on the Releases
-  # page — not buried under the Actions run's Artifacts. Includes the Python
-  # fallback binaries when their (best-effort) job produced any.
+  # Gather the Rust + desktop artifacts and publish them as ONE GitHub Release.
+  # Runs for `app-v*` tag pushes AND manual workflow_dispatch (prerelease named
+  # by the `tag` input). Depends ONLY on `build` so it publishes promptly; the
+  # Python fallback binaries are appended afterward by the `python-engine` job
+  # (which `needs: release`), so a slow Python runner never delays the release.
   release:
     name: publish release
-    needs: [build, python-engine]
+    needs: build
     if: >-
       always() && needs.build.result == 'success' &&
       (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
@@ -377,10 +429,13 @@ jobs:
             - Windows: `*.msi` + `*-setup.exe`
 
             **Optional Python fallback engine** (enables OCR / transcription /
-            Azure via `--engine auto` + `MARKITDOWN_PY_BIN`) — large, only needed
-            for those extras:
-            - `markitdown-py-{linux-x86_64,linux-aarch64,windows-x86_64,macos-aarch64}`
-            - Intel macOS: build locally with `app/python-engine/build_binary.sh`.
+            Azure, and is much faster on very large PDFs) — large, only needed
+            for those extras; appended shortly after the release is published:
+            - `markitdown-py-<platform>.{tar.gz,zip}` for linux-x86_64,
+              linux-aarch64, windows-x86_64, macos-aarch64, macos-x86_64.
+            - It's a *folder* build (fast startup). Extract it, keep the folder
+              intact, and point the desktop **Settings → Python engine** field
+              (or `MARKITDOWN_PY_BIN`) at the inner `markitdown-py` executable.
 
             - `SHA256SUMS.txt` — checksums for every asset.
 

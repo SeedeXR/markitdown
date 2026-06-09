@@ -12,8 +12,17 @@ conversion engine (`markitdown-core`) runs **in-process** — no shelling out.
 - Drag-and-drop zone (native OS file drop → real paths) + "Add files" dialog.
 - Job queue with per-file name, size, and live status (queued / converting /
   done / failed), each with a Lucide status icon.
-- Click a finished job to preview its Markdown, with a **Rendered / Raw** toggle
-  (rendered via a tiny dependency-free Markdown renderer).
+- Click a finished job to preview its Markdown, with a **Rendered / Raw** toggle.
+  - **Rendered** uses a tiny (~5 KB), dependency-free renderer that handles the
+    rich formatting the converters emit: headings, **bold**/*italic*/~~strike~~,
+    inline + fenced code, links, images (data/https), lists, blockquotes, GFM
+    **tables** (with in-cell `<br>`), `<!-- Slide N -->` markers (→ dividers) and
+    advisory notes. All input is HTML-escaped first, so a converted document can
+    never inject markup into the preview.
+  - **Raw** is the editable source you can tweak before saving.
+  - Tested by `src/markdown.test.ts` (run `npm test` — Node's built-in runner,
+    no extra deps). A full Markdown library was deliberately avoided to keep the
+    bundle small and rendering fast.
 - Copy-to-clipboard and Save-as `.md`.
 - Dark / light theme toggle, persisted in `localStorage`.
 - Footer listing supported input formats (queried from the engine).

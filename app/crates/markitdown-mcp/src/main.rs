@@ -73,8 +73,18 @@ fn engine(choice: Option<&str>) -> markitdown_core::MarkItDown {
         Some("python") => markitdown_core::Engine::Python,
         _ => markitdown_core::Engine::Auto,
     };
+    // Log conversion progress to stderr (never stdout — that's the protocol
+    // channel). For heavy files this shows per-page percentage in the server
+    // logs, so a long PDF conversion is visibly progressing, not hung.
+    let progress = markitdown_core::ProgressCallback::new(|p: markitdown_core::Progress| {
+        match p.percent() {
+            Some(pct) => tracing::info!(target: "markitdown::progress", "[{} {pct:>3}%] {}", p.phase, p.message),
+            None => tracing::info!(target: "markitdown::progress", "[{}] {}", p.phase, p.message),
+        }
+    });
     markitdown_core::MarkItDown::with_options(markitdown_core::ConvertOptions {
         engine,
+        progress: Some(progress),
         ..Default::default()
     })
 }

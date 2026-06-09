@@ -16,9 +16,9 @@
 //!   hung python         -> killed at MARKITDOWN_PY_TIMEOUT
 #![cfg(unix)]
 
-use markitdown_core::{ConvertOptions, Engine, MarkItDown};
+use markitdown_core::{ConvertOptions, Engine, MarkItDown, ProgressCallback};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Some tests mutate process-global env vars (MARKITDOWN_PY_ARGS/_TIMEOUT),
 /// and `std::env::set_var` racing concurrent `env::var` reads is UB-adjacent
@@ -230,6 +230,31 @@ fn py_args_env_is_appended() {
         "MARKITDOWN_PY_ARGS must pass through: {recorded}"
     );
     std::fs::remove_file(&argv).ok();
+}
+
+#[test]
+fn python_engine_emits_heartbeat_progress() {
+    let _g = guard();
+    // A slow stub (sleeps past one heartbeat interval) + a progress sink: the
+    // opaque subprocess must still produce liveness ("…s elapsed") events.
+    let stub = stub_engine("slow.sh", "sleep 3; echo DONE");
+    let events = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = events.clone();
+    let md = MarkItDown::with_options(ConvertOptions {
+        engine: Engine::Python,
+        python_bin: Some(stub),
+        progress: Some(ProgressCallback::new(move |p| {
+            sink.lock().unwrap().push(p.message)
+        })),
+        ..Default::default()
+    });
+    let r = md.convert_path(fixture("test.json")).unwrap();
+    assert!(r.markdown.contains("DONE"));
+    let msgs = events.lock().unwrap();
+    assert!(
+        msgs.iter().any(|m| m.contains("elapsed")),
+        "expected a Python heartbeat event, got: {msgs:?}"
+    );
 }
 
 #[test]

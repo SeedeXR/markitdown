@@ -39,3 +39,8 @@ formats.txt
 conv_out.md
 mcp_req.txt
 mcp_resp.txt
+test_files/
+
+# Bundled PDFium libs (downloaded at release time); keep only the README.
+desktop/src-tauri/pdfium/*
+!desktop/src-tauri/pdfium/README.md

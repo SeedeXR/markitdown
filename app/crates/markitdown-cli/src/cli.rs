@@ -60,6 +60,11 @@ pub struct Cli {
     #[arg(long)]
     pub keep_data_uris: bool,
 
+    /// Verbose progress to stderr: phase, timing, and per-page percentage for
+    /// large PDFs (so heavy conversions don't look like they're hanging).
+    #[arg(short = 'V', long)]
+    pub verbose: bool,
+
     /// Conversion engine. `auto` = pure Rust, transparently retrying with the
     /// optional Python engine (MARKITDOWN_PY_BIN) when Rust hits a fidelity
     /// gap (scanned PDF, DOCX comments/equations, RTF email body, OCR,

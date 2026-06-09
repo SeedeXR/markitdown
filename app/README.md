@@ -17,10 +17,15 @@ app/
 
 ## Supported formats
 
-PDF · DOCX · XLSX/XLS · PPTX · HTML (incl. Wikipedia / Bing SERP / YouTube
-pages) · CSV · EPUB · ZIP (recursive) · Jupyter `.ipynb` · Outlook `.msg` ·
-RSS/Atom · images (EXIF + dimensions) · audio (tags + duration) · plain
-text/Markdown/JSON. Inputs: paths, stdin, `file:`/`data:`/`http(s):` URIs.
+PDF · DOCX · XLSX/XLS · **ODS** · PPTX · HTML (incl. Wikipedia / Bing SERP /
+YouTube pages) · CSV · EPUB · **MOBI/Kindle** · ZIP (recursive) · Jupyter
+`.ipynb` · Outlook `.msg` · RSS/Atom · images (EXIF + dimensions) · audio
+(tags + duration) · plain text/Markdown/JSON. Inputs: paths, stdin,
+`file:`/`data:`/`http(s):` URIs.
+
+> **ODS** (OpenDocument spreadsheets) and **MOBI/Kindle** e-books are handled by
+> the pure-Rust engine but are **not** supported by the upstream Python
+> markitdown — so for those, the Rust engine is the only one that works.
 
 ## Nothing is unsupported: the Auto fallback
 
@@ -45,6 +50,96 @@ Wikipedia / Bing converters fully activate), local files as **paths**
 (zero-copy), stdin bytes only as a last resort. Extra Python CLI args pass
 through `MARKITDOWN_PY_ARGS` — e.g. Azure Document Intelligence:
 `MARKITDOWN_PY_ARGS="-d -e https://<res>.cognitiveservices.azure.com/"`.
+
+## Formatting fidelity (what becomes Markdown)
+
+Structured formats are translated to Markdown, not flattened to plain text:
+
+| Format | Headings | Bold / Italic | Tables | Other |
+|---|---|---|---|---|
+| **DOCX** | `Heading 1–9`/`Title` → `#`–`######` | `w:b`→`**`, `w:i`→`*` | `w:tbl` → GFM table | lists, hyperlinks |
+| **XLSX/XLS** | `## <sheet>` per sheet | — | each sheet → GFM table | — |
+| **PPTX** | title placeholder → `#` | (run styles) | `a:tbl` → GFM table | `<!-- Slide N -->`, image alt, notes, charts |
+| **HTML/EPUB** | `<h1–6>` → `#` | `<b>/<strong>`, `<i>/<em>` | `<table>` → GFM | lists, links, blockquotes |
+| **PDF** | — (text only) | — | — | linear text; *with the optional Python engine, pdfplumber reconstructs tables* |
+
+PDF carries no semantic structure (no real "heading"/"bold" markup), so the
+pure-Rust and PDFium paths extract clean linear text; table reconstruction comes
+from the Python engine (pdfplumber). DOCX/XLSX/PPTX/HTML/EPUB have real structure
+and are translated faithfully (verified by `tests/formatting.rs`, including a
+synthetic bold/italic/heading/table DOCX).
+
+## Performance & progress (heavy files)
+
+Conversions report progress so a big file never looks hung — across **all**
+formats and both engines:
+- **PDF** → per-page `page X/N (Y%)`; **XLSX** → per-sheet; **PPTX** → per-slide;
+  **ZIP** → per-file; every format emits coarse `detect → convert → done` with
+  timing.
+- CLI: `-V` streams it to stderr; the desktop shows a live per-job progress bar;
+  the MCP server logs it; the **Python engine** emits an elapsed-time heartbeat
+  (it's a subprocess, so no per-unit signal).
+- Progress is opt-in (a sink must be attached), so default conversions carry
+  **zero overhead** and stay lightweight.
+
+**Engine speed depends on the document.** Profiled on a 342 MB / 69-page,
+image-heavy PDF (Apple Silicon, release build):
+
+| Engine | Wall time | Output |
+|---|---|---|
+| Rust `pdf-extract`/`lopdf` (rayon, default) | ~21s | 75 KB |
+| Python `pdfminer` | ~6.5s | 169 KB (with tables) |
+| **Rust + PDFium** (`--features pdfium`) | **~1.3s** | 75 KB |
+
+For this large, image-heavy PDF the Python engine is fastest (lazy parser that
+skips the image objects text never needs). The pure-Rust cost is the document
+*load* inside `lopdf` (extraction itself is <1s). We parallelize that load
+across cores by enabling lopdf's `rayon` feature (which `pdf-extract` disables
+by default) — **57s → ~21s** end-to-end with identical output, no code change.
+For the fastest PDF path, build with the optional **PDFium** backend
+(`--features pdfium`) — Google's PDF engine, loaded as a dynamic library at
+runtime: **~1.3s** on the same file (≈16× the default Rust, ≈5× pdfminer),
+and it also improves layout/table fidelity.
+
+### Optional PDFium backend (`--features pdfium`)
+
+```bash
+# 1. Get a PDFium shared library (prebuilt):
+#    https://github.com/bblanchon/pdfium-binaries/releases  (pick your OS/arch)
+#    -> libpdfium.dylib (macOS) / libpdfium.so (Linux) / pdfium.dll (Windows)
+# 2. Build with the feature:
+cargo build --release --features pdfium -p markitdown-cli
+# 3. Tell it where the library is (any one):
+export MARKITDOWN_PDFIUM_LIB=/path/to/libpdfium.dylib   # explicit
+#   …or drop the library next to the markitdown binary, or install it system-wide.
+markitdown big.pdf      # now uses PDFium
+```
+
+**Release artifacts bundle PDFium automatically.** The published CLI/MCP
+archives ship the matching `libpdfium` next to the binaries, and the desktop
+app bundles it as a resource (wired up at startup) — so installed apps get the
+fast PDF path with **zero setup**. The steps above are only needed when you
+build from source yourself.
+
+Behavior & tradeoffs:
+- **Opt-in when building from source, off by default.** A plain `cargo build`
+  stays 100% pure-Rust/static; the `pdfium` feature pulls a C library that must
+  be present at runtime (released artifacts include it).
+- **Graceful fallback.** If the feature is built but no PDFium library is found
+  (or it errors), conversion automatically falls back to the pure-Rust
+  extractor — it never hard-fails.
+- The library is discovered via `MARKITDOWN_PDFIUM_LIB`, then next to the
+  executable, then the system.
+
+Takeaways:
+- For **very large PDFs**, prefer the Python engine: `--engine python` (or
+  `auto` with `MARKITDOWN_PY_BIN` set / the desktop's Python-binary setting).
+- For typical small/medium files the pure-Rust engine is instant, uses no
+  Python, and is the right default.
+- **Dev builds**: `tauri dev` / debug `cargo` now optimize dependencies
+  (`opt-level=3`), so heavy files aren't pathologically slow in development; the
+  shipped release app is always optimized. Use `npm run tauri build` for real
+  use.
 
 ## LLM image captions (works everywhere — cloud or local LLM)
 
@@ -149,7 +244,7 @@ used automatically by `--engine auto`.
 | `[pdf]` PDF | ✅ text | ✅ full | `pdf-extract`; scanned/OCR + complex tables are *degraded* → Python (OCR plugin / pdfplumber) |
 | `[outlook]` `.msg` | ✅ native | ✅ full | `msg_parser` (headers + plain-text body); RTF-only body *degraded* → Python |
 | `[audio-transcription]` wav/mp3 | ⚠️ tags only | ✅ transcription | audio is *degraded* → Python (`audio-transcription` extra) auto-runs |
-| `[youtube-transcription]` | ⚠️ page metadata | ✅ transcript | YouTube page is *degraded* → Python (`youtube-transcript-api`) auto-runs |
+| `[youtube-transcription]` | ✅ metadata **+ transcript** | ✅ transcript | Rust now fetches the transcript natively (reads `captionTracks` from `ytInitialPlayerResponse` → timedtext, like `youtube-transcript-api`; needs the `net` feature). Only *degraded* → Python when a video has no captions |
 | `[az-doc-intel]` Azure DI | ❌ (cloud) | ✅ | `MARKITDOWN_PY_ARGS="-d -e https://<res>.cognitiveservices.azure.com/"` |
 | `[az-content-understanding]` Azure CU | ❌ (cloud) | ✅ | `MARKITDOWN_PY_ARGS="--use-cu --cu-endpoint <endpoint>"` |
 | `[all]` everything | ✅ all local formats | ✅ everything | Rust handles local formats; Python adds OCR, transcription, Azure |
@@ -159,11 +254,11 @@ Legend: ✅ supported · ⚠️ partial (metadata, no transcription/OCR) without
 Python engine · ❌ not available in pure Rust.
 
 In short: every **local document format** (`pptx`, `docx`, `xlsx`, `xls`,
-`pdf`, `outlook`) works out of the box in pure Rust. The **cloud and
-transcription** groups (`az-doc-intel`, `az-content-understanding`,
-`audio-transcription`, `youtube-transcription`) require the hybrid Python
-engine and are reached automatically by `--engine auto` once it is configured —
-nothing is permanently unsupported.
+`pdf`, `outlook`) works out of the box in pure Rust, and **YouTube transcripts**
+are now fetched natively too. The **cloud and audio-transcription** groups
+(`az-doc-intel`, `az-content-understanding`, `audio-transcription`) still
+require the hybrid Python engine and are reached automatically by
+`--engine auto` once it is configured — nothing is permanently unsupported.
 
 ## Build everything
 

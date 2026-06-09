@@ -185,6 +185,57 @@ fn missing_file_fails() {
 }
 
 #[test]
+fn verbose_shows_per_page_percentage_rust_engine() {
+    // Progress goes to STDERR; stdout stays clean Markdown.
+    let out = run(&[
+        "-V",
+        "--engine",
+        "rust",
+        fixture("REPAIR-2022-INV-001_multipage.pdf").to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("[detect"), "phase logging expected:\n{err}");
+    assert!(err.contains("page 1/"), "per-page progress expected:\n{err}");
+    assert!(err.contains("100%"), "should reach 100%:\n{err}");
+    assert!(err.contains("[done"), "done phase + timing expected:\n{err}");
+    // stdout must be the document, not progress noise.
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("[pdf"));
+}
+
+#[test]
+fn verbose_logs_python_engine_delegation() {
+    // Stub standing in for the PyInstaller python binary.
+    let dir = std::env::temp_dir().join(format!("md-vpy-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let stub = dir.join("stub-py");
+    std::fs::write(&stub, "#!/bin/sh\necho '# from python stub'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // Skip on platforms where we can't make an executable shell stub.
+    if cfg!(not(unix)) {
+        return;
+    }
+    let out = run(&[
+        "-V",
+        "--engine",
+        "python",
+        "--python-bin",
+        stub.to_str().unwrap(),
+        fixture("test.pdf").to_str().unwrap(),
+    ]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {err}");
+    assert!(err.contains("[python"), "python phase log expected:\n{err}");
+    assert!(err.contains("delegating"), "delegation message expected:\n{err}");
+    assert!(err.contains("[done"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn check_reports_unconfigured_without_secrets() {
     // Force "not configured" deterministically regardless of ambient env.
     let out = Command::new(BIN)

@@ -28,8 +28,8 @@
           <button
             id="settings-btn"
             class="btn icon-only"
-            title="LLM caption settings"
-            aria-label="LLM caption settings"
+            title="Settings"
+            aria-label="Settings"
             aria-haspopup="dialog"
           >
             <span class="ico" data-icon="sliders-horizontal"></span>
@@ -153,8 +153,8 @@
         >
           <div class="modal-head">
             <div class="modal-title" id="settings-title">
-              <span class="ico" data-icon="sparkles"></span>
-              <span>LLM image captions</span>
+              <span class="ico" data-icon="sliders-horizontal"></span>
+              <span>Settings</span>
             </div>
             <button
               id="settings-close"
@@ -167,12 +167,43 @@
           </div>
 
           <p class="modal-intro">
-            Describe images during conversion using any OpenAI-compatible
-            endpoint — including local models. Settings are stored on this
-            device only; your API key is never logged or displayed.
+            Point the app at an optional Python fallback engine, and describe
+            images during conversion using any OpenAI-compatible endpoint —
+            including local models. Settings are stored on this device only;
+            your API key is never logged or displayed.
           </p>
 
           <form id="settings-form" class="settings-form">
+            <div class="field">
+              <span class="field-label">
+                <span class="ico field-ico" data-icon="terminal"></span> Python engine
+              </span>
+              <div class="field-row">
+                <input
+                  id="py-bin"
+                  class="field-input field-row-input"
+                  type="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="/path/to/markitdown-py"
+                  aria-label="Python engine binary path"
+                />
+                <button id="py-bin-browse" class="btn" type="button" title="Browse for binary">
+                  <span class="ico" data-icon="folder-open"></span><span>Browse</span>
+                </button>
+              </div>
+              <span class="field-help">
+                Optional. Path to a compiled <code>markitdown-py</code> binary (see
+                <code>app/python-engine</code>) — enables the Python fallback engine for
+                OCR / transcription / faster large-PDF parsing. GUI apps don't inherit
+                shell env, so set it here.
+              </span>
+              <div class="settings-status" id="py-status" data-on="false">
+                <span class="ico" data-icon="terminal"></span>
+                <span id="py-status-text">Python engine off</span>
+              </div>
+            </div>
+
             <label class="field">
               <span class="field-label">
                 <span class="ico field-ico" data-icon="boxes"></span> Provider

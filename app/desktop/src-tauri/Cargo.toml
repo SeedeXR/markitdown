@@ -18,7 +18,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-markitdown-core = { path = "../../crates/markitdown-core" }
+# `pdfium` enables the fast PDF backend; the matching PDFium library is bundled
+# as a Tauri resource (see tauri.conf.json) and wired up at startup. Falls back
+# to pure-Rust when the library isn't present (e.g. `tauri dev` without it).
+markitdown-core = { path = "../../crates/markitdown-core", features = ["pdfium"] }
 
 [profile.release]
 panic = "abort"
@@ -26,3 +29,14 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# `tauri dev` compiles the backend in the dev profile. Without this, heavy
+# dependencies like `pdf-extract` run UNOPTIMIZED (opt-level 0) — a large PDF
+# that takes ~1 min in release can take 10+ min in dev. Optimizing all
+# dependencies to opt-level 3 (while keeping our own crate at 1 for fast
+# incremental rebuilds) makes dev-mode conversion run at near-release speed.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

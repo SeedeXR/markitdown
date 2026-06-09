@@ -10,6 +10,10 @@ repository.workspace = true
 name = "markitdown-mcp"
 path = "src/main.rs"
 
+[features]
+# Enable the fast PDFium PDF backend (needs the PDFium lib at runtime).
+pdfium = ["markitdown-core/pdfium"]
+
 [dependencies]
 markitdown-core = { workspace = true }
 rmcp = { workspace = true }

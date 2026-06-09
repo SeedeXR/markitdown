@@ -44,4 +44,24 @@ pub struct ConvertOptions {
     /// `MARKITDOWN_LLM_MODEL` / `MARKITDOWN_LLM_API_BASE` /
     /// `MARKITDOWN_LLM_PROMPT` environment variables are consulted.
     pub llm: Option<LlmConfig>,
+    /// Optional progress sink. When set, converters emit cheap COARSE phase
+    /// updates (detect / convert / python / done) — a handful of calls per
+    /// conversion, no measurable cost, and the original fast extraction paths
+    /// are used unchanged. `None` = zero overhead.
+    pub progress: Option<crate::progress::ProgressCallback>,
+    /// Opt in to FINE-GRAINED progress (e.g. per-page PDF percentage). This
+    /// trades speed for visibility: the PDF converter switches from the single
+    /// fast extraction call to page-by-page extraction. Only enable for
+    /// interactive diagnostics (the CLI's `-V`), never on a hot path. Requires
+    /// `progress` to be set to have any effect.
+    pub fine_progress: bool,
+}
+
+impl ConvertOptions {
+    /// Emit a progress update if a sink is installed (no-op otherwise).
+    pub fn report(&self, p: crate::progress::Progress) {
+        if let Some(cb) = &self.progress {
+            cb.report(p);
+        }
+    }
 }

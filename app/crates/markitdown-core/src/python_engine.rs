@@ -29,12 +29,90 @@ fn timeout() -> std::time::Duration {
         .unwrap_or(DEFAULT_TIMEOUT)
 }
 
-/// Resolve the configured Python engine binary, if any.
+/// The unambiguous name of the bundled/installed Python engine binary. We
+/// NEVER auto-discover a bare `markitdown` (that's this suite's own Rust CLI —
+/// discovering it would make the engine invoke itself). Only this exact name
+/// is searched for, so discovery can't pick the wrong binary.
+#[cfg(windows)]
+const PY_BIN_NAME: &str = "markitdown-py.exe";
+#[cfg(not(windows))]
+const PY_BIN_NAME: &str = "markitdown-py";
+
+/// Resolve the Python engine binary, trying (in order):
+/// 1. an explicit `opts.python_bin` (CLI `--python-bin`, desktop Settings),
+/// 2. the `MARKITDOWN_PY_BIN` environment variable,
+/// 3. auto-discovery: a `markitdown-py` binary next to the running executable
+///    (a Tauri sidecar / side-by-side install) or anywhere on `PATH`.
+///
+/// Step 3 is what makes an *installed* app "just work" without the user
+/// exporting an env var — important because GUI apps (Finder/dock-launched)
+/// don't inherit the shell environment on macOS/Linux/Windows.
 pub fn resolve_python_bin(opts: &ConvertOptions) -> Option<PathBuf> {
-    opts.python_bin
-        .clone()
-        .or_else(|| std::env::var_os(PY_BIN_ENV).map(PathBuf::from))
-        .filter(|p| p.exists())
+    if let Some(p) = opts.python_bin.clone().and_then(normalize_bin) {
+        return Some(p);
+    }
+    if let Some(p) = std::env::var_os(PY_BIN_ENV)
+        .map(PathBuf::from)
+        .and_then(normalize_bin)
+    {
+        return Some(p);
+    }
+    discover_python_bin()
+}
+
+/// Accept either the engine executable directly, or a directory containing it.
+/// onedir builds produce a *folder* `markitdown-py/` whose launcher is
+/// `markitdown-py/markitdown-py` — users (and file pickers) often point at the
+/// folder, so resolve that to the inner binary instead of failing.
+fn normalize_bin(p: PathBuf) -> Option<PathBuf> {
+    if p.is_file() {
+        return Some(p);
+    }
+    if p.is_dir() {
+        let inner = p.join(PY_BIN_NAME);
+        if inner.is_file() {
+            return Some(inner);
+        }
+    }
+    None
+}
+
+/// Look for the engine next to the current executable, then on `PATH`. Both a
+/// one-file `markitdown-py` and an onedir **folder** (`markitdown-py/markitdown-py`)
+/// are recognized, so dropping either next to the app — or a Tauri sidecar —
+/// is auto-discovered.
+fn discover_python_bin() -> Option<PathBuf> {
+    fn in_dir(dir: &std::path::Path) -> Option<PathBuf> {
+        // one-file binary directly in `dir`
+        let one = dir.join(PY_BIN_NAME);
+        if one.is_file() {
+            return Some(one);
+        }
+        // onedir layout: `dir/markitdown-py/markitdown-py[.exe]`
+        let onedir = dir.join("markitdown-py").join(PY_BIN_NAME);
+        if onedir.is_file() {
+            return Some(onedir);
+        }
+        None
+    }
+
+    // Next to the running binary (side-by-side CLI install / Tauri sidecar).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(p) = in_dir(dir) {
+                return Some(p);
+            }
+        }
+    }
+    // Anywhere on PATH (markitdown-py installed system-wide).
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if let Some(p) = in_dir(&dir) {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// True when a usable Python fallback binary is configured.
@@ -124,7 +202,39 @@ pub fn convert_with_python(
         Input::Arg(_) => None,
     };
 
+    // Heartbeat: the Python subprocess is opaque (it streams Markdown to
+    // stdout, not progress), so per-page % isn't available — but we can keep
+    // the UI/logs alive with an elapsed-time tick every few seconds, mirroring
+    // the Rust path's liveness. Only runs when a progress sink is installed.
+    let heartbeat_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let heartbeat = opts.progress.clone().map(|cb| {
+        let stop = heartbeat_stop.clone();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            loop {
+                // Sleep in short slices so we stop promptly when done.
+                for _ in 0..20 {
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                cb.report(crate::Progress::msg(
+                    "python",
+                    format!("Python engine running… {:.0}s elapsed", start.elapsed().as_secs_f64()),
+                ));
+            }
+        })
+    });
+
     let out = wait_with_timeout(child, timeout())?;
+    heartbeat_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(h) = heartbeat {
+        let _ = h.join();
+    }
     if let Some(w) = writer {
         let _ = w.join();
     }

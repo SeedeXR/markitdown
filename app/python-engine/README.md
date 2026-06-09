@@ -25,20 +25,62 @@ pure-Rust engine intentionally does not bundle:
 The release pipeline already publishes `markitdown-py-<platform>` binaries
 (Linux x86_64/aarch64, Windows x86_64, macOS Apple Silicon) on the GitHub
 Releases page — download one and point `MARKITDOWN_PY_BIN` at it instead of
-building. Intel macOS isn't prebuilt (PyInstaller can't cross-compile and an
-arm64 Python binary won't run on Intel), so build it locally there.
+building. Now built for Intel macOS too (on the `macos-13` runner, best-effort). Each
+asset is `markitdown-py-<platform>.{tar.gz,zip}` — extract it and keep the
+folder intact (see onedir note below).
 
 ## Build
 
 ```bash
-./build_binary.sh        # macOS / Linux
+./build_binary.sh        # macOS / Linux  (uses python3.12/3.11/3.10; needs 3.10–3.13)
 # or on Windows:
 pwsh ./build_binary.ps1
 ```
 
-Produces `dist/markitdown-py`.
+Produces a **onedir** folder `dist/markitdown-py/` whose launcher is
+`dist/markitdown-py/markitdown-py` (`.exe` on Windows) — point
+`MARKITDOWN_PY_BIN` / the desktop Settings field at that inner executable.
 
-## Enable
+> **Why onedir (the default), not a single file?** A PyInstaller *one-file*
+> binary re-extracts ~100 MB to a temp dir on every launch; on macOS that also
+> triggers a Gatekeeper re-scan, costing **~45s of startup per run** and wiping
+> out the engine's speed advantage. onedir extracts once, so startup is ~0.5s
+> after the first run (the 342 MB test PDF then converts in ~7s vs ~57s in pure
+> Rust). Use `BUILD_MODE=onefile ./build_binary.sh` for a single portable file
+> if you accept the slow macOS cold start.
+
+> **Python version:** the build requires Python 3.10–3.13 (defaults to 3.12 to
+> match CI). A too-new interpreter (e.g. 3.14) lacks wheels for the native deps
+> and the script will stop with guidance rather than hang.
+
+## How the engine binary is found (so it works in installed apps)
+
+The engine is located in this order — the later steps make a *packaged* app
+work without the user setting any environment variable (important because
+GUI apps launched from Finder/Start menu don't inherit your shell's env):
+
+1. An explicit path — CLI `--python-bin`, or the **desktop Settings → Python
+   engine** field (with a Browse button).
+2. The `MARKITDOWN_PY_BIN` environment variable.
+3. **Auto-discovery**: a binary named exactly `markitdown-py` (`markitdown-py.exe`
+   on Windows) sitting **next to the running executable**, or anywhere on
+   `PATH`. (Only that exact name is searched — never a bare `markitdown`, which
+   is this suite's own Rust CLI.)
+
+So, to make an installed app "just work" on Linux/macOS/Windows, do any one of:
+- **Bundle it next to the app**: ship `markitdown-py` in the same directory as
+  the `markitdown` / desktop executable (for Tauri, add it as an
+  [external binary / sidecar](https://tauri.app/develop/sidecar/) named
+  `markitdown-py`). Auto-discovery finds it.
+- **Install it on `PATH`**: drop `markitdown-py` in `/usr/local/bin` (macOS/
+  Linux) or a `PATH` dir (Windows).
+- **Point at it**: set the desktop Settings field or `MARKITDOWN_PY_BIN`.
+
+And — crucially — if none of these are present, **nothing breaks**: the default
+`auto` engine just uses pure Rust and never errors. The "missing dependency"
+message only appears if you *force* `--engine python` with no binary available.
+
+## Enable manually
 
 ```bash
 export MARKITDOWN_PY_BIN="$PWD/dist/markitdown-py"

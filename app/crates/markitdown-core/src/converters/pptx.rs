@@ -74,9 +74,16 @@ impl Converter for PptxConverter {
         // Preload every part so we can cross-reference rels/charts/media.
         let parts = read_all(&mut zip);
 
+        let total = slide_names.len() as u64;
         let mut md = String::new();
         for (i, slide_name) in slide_names.iter().enumerate() {
             let slide_num = i + 1;
+            opts.report(crate::Progress::step(
+                "pptx",
+                format!("slide {slide_num}/{total}"),
+                slide_num as u64,
+                total,
+            ));
             let xml = match parts.get(slide_name) {
                 Some(b) => String::from_utf8_lossy(b).into_owned(),
                 None => continue,

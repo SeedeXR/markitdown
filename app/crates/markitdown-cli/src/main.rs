@@ -3,7 +3,8 @@ mod cli;
 use clap::Parser;
 use cli::{Cli, EngineArg};
 use markitdown_core::{
-    ConvertOptions, ConvertResult, Engine, LlmConfig, MarkItDown, StreamInfo, SUPPORTED_FORMATS,
+    ConvertOptions, ConvertResult, Engine, LlmConfig, MarkItDown, Progress, ProgressCallback,
+    StreamInfo, SUPPORTED_FORMATS,
 };
 use rayon::prelude::*;
 use std::io::{Read, Write};
@@ -51,6 +52,10 @@ fn main() -> ExitCode {
         return print_or_pipe_ok(buf.as_bytes());
     }
 
+    // Verbose progress (phase + per-page %) only applies to a single
+    // foreground conversion; in parallel batch mode many files would
+    // interleave illegibly, so batch keeps its own per-file ok/FAILED lines.
+    let verbose_single = args.verbose && args.inputs.len() <= 1;
     let opts = ConvertOptions {
         keep_data_uris: args.keep_data_uris,
         engine: match args.engine {
@@ -60,6 +65,10 @@ fn main() -> ExitCode {
         },
         python_bin: args.python_bin.clone(),
         llm: build_llm_config(&args),
+        progress: verbose_single.then(stderr_progress),
+        // -V opts into per-page PDF % (slower but visible); plain runs keep the
+        // fast path.
+        fine_progress: verbose_single,
     };
 
     if args.check {
@@ -109,6 +118,25 @@ fn build_llm_config(args: &Cli) -> Option<LlmConfig> {
         api_key: args.llm_api_key.clone().unwrap_or_default(),
         model: args.llm_model.clone().unwrap_or_default(),
         prompt: args.llm_prompt.clone(),
+    })
+}
+
+/// A progress sink that writes phase + percentage lines to stderr. Percentage
+/// updates are throttled to whole-percent changes so a 1000-page PDF prints
+/// ~100 lines, not 1000 — readable both on a TTY and in piped CI logs.
+fn stderr_progress() -> ProgressCallback {
+    use std::sync::atomic::{AtomicI16, Ordering};
+    let last_pct = std::sync::Arc::new(AtomicI16::new(-1));
+    ProgressCallback::new(move |p: Progress| {
+        if let Some(pct) = p.percent() {
+            if last_pct.swap(pct as i16, Ordering::Relaxed) == pct as i16 {
+                return; // same percent — skip to keep output readable
+            }
+            eprintln!("  [{:<7} {pct:>3}%] {}", p.phase, p.message);
+        } else {
+            last_pct.store(-1, Ordering::Relaxed);
+            eprintln!("  [{:<12}] {}", p.phase, p.message);
+        }
     })
 }
 

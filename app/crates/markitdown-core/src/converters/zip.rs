@@ -76,11 +76,21 @@ impl Converter for ZipConverter {
             .collect();
         let mut degraded = false;
 
+        // Count non-directory entries for percentage.
+        let total = names.iter().filter(|n| !n.ends_with('/')).count() as u64;
+        let mut done = 0u64;
         for name in names {
             // Skip directory entries.
             if name.ends_with('/') {
                 continue;
             }
+            done += 1;
+            opts.report(crate::Progress::step(
+                "zip",
+                format!("file {done}/{total}: {name}"),
+                done,
+                total,
+            ));
             let mut bytes = Vec::new();
             {
                 let mut file = match zip.by_name(&name) {

@@ -17,8 +17,8 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use markitdown_core::{
     capabilities as core_capabilities, llm_caption_available, python_engine_available,
-    Capabilities as CoreCapabilities, ConvertOptions, Engine, LlmConfig, MarkItDown,
-    LLM_PROVIDERS, SUPPORTED_FORMATS,
+    Capabilities as CoreCapabilities, ConvertOptions, Engine, LlmConfig, MarkItDown, Progress,
+    ProgressCallback, LLM_PROVIDERS, SUPPORTED_FORMATS,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
@@ -39,6 +39,12 @@ pub struct ConvertRequest {
     /// [`LlmConfig`] only when api_base + api_key + model are all non-empty.
     #[serde(default)]
     pub llm: Option<LlmCfg>,
+    /// Optional path to a compiled `markitdown-py` binary, supplied by the UI.
+    /// GUI apps don't inherit the shell environment, so the user points the app
+    /// at the binary here instead of relying on `MARKITDOWN_PY_BIN`. Trimmed and
+    /// empty → None (falls back to the env).
+    #[serde(default)]
+    pub python_bin: Option<String>,
 }
 
 /// LLM image-caption settings as sent from the frontend. Every field is
@@ -72,6 +78,16 @@ pub fn to_llm_config(cfg: Option<&LlmCfg>) -> Option<LlmConfig> {
         model: trimmed(&cfg.model)?,
         prompt: trimmed(&cfg.prompt),
     })
+}
+
+/// Map a frontend-supplied python binary path to a core option value. Trimmed
+/// and empty/whitespace → `None`, so a blank Settings field falls back to the
+/// `MARKITDOWN_PY_BIN` environment variable instead of claiming a binary.
+pub fn parse_python_bin(value: Option<&str>) -> Option<std::path::PathBuf> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 /// Map a frontend engine string to the core [`Engine`]. Unknown/absent values
@@ -173,8 +189,23 @@ pub struct LlmProviderInfo {
     pub notes: String,
 }
 
-/// The event channel the frontend listens on.
+/// The event channel the frontend listens on for status changes.
 const JOB_EVENT: &str = "job:update";
+/// The event channel for fine-grained progress (phase + percentage) during a
+/// running conversion, so the UI can show live progress on heavy files.
+const PROGRESS_EVENT: &str = "job:progress";
+
+/// A progress update for a specific job, emitted while it is converting.
+#[derive(Debug, Clone, Serialize)]
+pub struct JobProgress {
+    pub id: String,
+    /// Coarse phase: detect / convert / pdf / python / done.
+    pub phase: String,
+    pub message: String,
+    /// 0–100 when known (e.g. per-page PDF), else absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+}
 
 /// Upper bound on simultaneous conversions. Keeps a flood of dropped files
 /// from spawning unbounded blocking threads.
@@ -251,9 +282,43 @@ fn run_one(app: &AppHandle, req: &ConvertRequest) {
         std::fs::metadata(&req.path).map(|m| m.len()).ok()
     };
 
+    // Live progress: forward core progress events to the webview as
+    // `job:progress`. Percentage lines are throttled to whole-percent changes
+    // so a 1000-page PDF doesn't flood the UI with events.
+    let progress = {
+        use std::sync::atomic::{AtomicI16, Ordering};
+        let app = app.clone();
+        let id = req.id.clone();
+        let last_pct = std::sync::Arc::new(AtomicI16::new(-1));
+        ProgressCallback::new(move |p: Progress| {
+            let percent = p.percent();
+            if let Some(pct) = percent {
+                if last_pct.swap(pct as i16, Ordering::Relaxed) == pct as i16 {
+                    return; // same percent — skip
+                }
+            } else {
+                last_pct.store(-1, Ordering::Relaxed);
+            }
+            let _ = app.emit(
+                PROGRESS_EVENT,
+                JobProgress {
+                    id: id.clone(),
+                    phase: p.phase.to_string(),
+                    message: p.message,
+                    percent,
+                },
+            );
+        })
+    };
+
     let md = MarkItDown::with_options(ConvertOptions {
         engine: parse_engine(req.engine.as_deref()),
         llm: to_llm_config(req.llm.as_ref()),
+        python_bin: parse_python_bin(req.python_bin.as_deref()),
+        progress: Some(progress),
+        // Per-page PDF percentage (benchmarked at ~release speed); gives heavy
+        // files a visible, moving progress indicator instead of a frozen UI.
+        fine_progress: true,
         ..Default::default()
     });
 
@@ -348,14 +413,16 @@ fn get_capabilities() -> Capabilities {
 
 /// Richer capability report that folds in the UI's current LLM settings.
 ///
-/// Builds [`ConvertOptions`] from the passed `llm` block (falling back to the
-/// environment when it's empty) and returns the core [`Capabilities`], which
-/// includes the resolved model + api_base for status display but — by design
-/// of the core type — never the API key.
+/// Builds [`ConvertOptions`] from the passed `llm` block + `python_bin` path
+/// (falling back to the environment when either is empty) and returns the core
+/// [`Capabilities`], which includes the resolved model + api_base and the
+/// resolved Python engine path for status display but — by design of the core
+/// type — never the API key.
 #[tauri::command]
-fn capabilities(llm: Option<LlmCfg>) -> CoreCapabilities {
+fn capabilities(llm: Option<LlmCfg>, python_bin: Option<String>) -> CoreCapabilities {
     let opts = ConvertOptions {
         llm: to_llm_config(llm.as_ref()),
+        python_bin: parse_python_bin(python_bin.as_deref()),
         ..Default::default()
     };
     core_capabilities(&opts)
@@ -363,8 +430,27 @@ fn capabilities(llm: Option<LlmCfg>) -> CoreCapabilities {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri::Manager;
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            // If a PDFium library is bundled with the app, point the engine at
+            // it so the fast PDF backend works with zero config in an installed
+            // app. The user's MARKITDOWN_PDFIUM_LIB (if set) always wins.
+            if std::env::var_os("MARKITDOWN_PDFIUM_LIB").is_none() {
+                if let Ok(res) = app.path().resource_dir() {
+                    let dir = res.join("pdfium");
+                    for name in ["libpdfium.dylib", "libpdfium.so", "pdfium.dll"] {
+                        let lib = dir.join(name);
+                        if lib.is_file() {
+                            std::env::set_var("MARKITDOWN_PDFIUM_LIB", lib);
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             convert_files,
             save_markdown,
@@ -423,6 +509,41 @@ mod tests {
         assert_eq!(req.path, "/tmp/file.txt");
         // engine is optional and defaults to None.
         assert_eq!(req.engine, None);
+    }
+
+    #[test]
+    fn convert_request_deserializes_with_python_bin() {
+        let req: ConvertRequest = serde_json::from_str(
+            r#"{"id":"x","path":"/tmp/file.txt","engine":"python","python_bin":"/opt/markitdown-py"}"#,
+        )
+        .unwrap();
+        assert_eq!(req.engine.as_deref(), Some("python"));
+        assert_eq!(req.python_bin.as_deref(), Some("/opt/markitdown-py"));
+        assert_eq!(
+            parse_python_bin(req.python_bin.as_deref()),
+            Some(std::path::PathBuf::from("/opt/markitdown-py"))
+        );
+    }
+
+    #[test]
+    fn convert_request_python_bin_defaults_to_none() {
+        let req: ConvertRequest =
+            serde_json::from_str(r#"{"id":"x","path":"/p"}"#).unwrap();
+        assert!(req.python_bin.is_none());
+    }
+
+    #[test]
+    fn parse_python_bin_empty_or_whitespace_is_none() {
+        // Absent, empty and whitespace-only all map to None so a blank Settings
+        // field never produces a false "Python engine available".
+        assert!(parse_python_bin(None).is_none());
+        assert!(parse_python_bin(Some("")).is_none());
+        assert!(parse_python_bin(Some("   ")).is_none());
+        // A real path is trimmed and kept.
+        assert_eq!(
+            parse_python_bin(Some("  /usr/local/bin/markitdown-py  ")),
+            Some(std::path::PathBuf::from("/usr/local/bin/markitdown-py"))
+        );
     }
 
     #[test]

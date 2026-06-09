@@ -44,12 +44,18 @@ impl MarkItDown {
         md.register(PRIORITY_SPECIFIC, Box::new(converters::BingSerpConverter));
         md.register(PRIORITY_SPECIFIC, Box::new(converters::YouTubeConverter));
         md.register(PRIORITY_SPECIFIC, Box::new(converters::RssConverter));
+        // Generic structured XML — registered AFTER RssConverter so feed-like
+        // .xml goes to RSS and arbitrary .xml falls here.
+        md.register(PRIORITY_SPECIFIC, Box::new(converters::XmlConverter));
         md.register(PRIORITY_SPECIFIC, Box::new(converters::DocxConverter));
         md.register(PRIORITY_SPECIFIC, Box::new(converters::XlsxConverter));
         md.register(PRIORITY_SPECIFIC, Box::new(converters::XlsConverter));
+        md.register(PRIORITY_SPECIFIC, Box::new(converters::OdsConverter));
         md.register(PRIORITY_SPECIFIC, Box::new(converters::PptxConverter));
         md.register(PRIORITY_SPECIFIC, Box::new(converters::PdfConverter));
         md.register(PRIORITY_SPECIFIC, Box::new(converters::EpubConverter));
+        md.register(PRIORITY_SPECIFIC, Box::new(converters::MobiConverter));
+        md.register(PRIORITY_SPECIFIC, Box::new(converters::MhtmlConverter));
         md.register(PRIORITY_SPECIFIC, Box::new(converters::IpynbConverter));
         md.register(PRIORITY_SPECIFIC, Box::new(converters::CsvConverter));
         md.register(PRIORITY_SPECIFIC, Box::new(converters::OutlookMsgConverter));
@@ -96,12 +102,47 @@ impl MarkItDown {
         hints: StreamInfo,
     ) -> Result<ConvertResult, ConvertError> {
         let info = detect::enrich(data, hints);
+        let started = std::time::Instant::now();
+        self.options.report(crate::Progress::msg(
+            "detect",
+            format!(
+                "input: {} ({:.1} MB){}",
+                info.mimetype.as_deref().unwrap_or("unknown type"),
+                data.len() as f64 / 1_048_576.0,
+                info.extension.as_deref().map(|e| format!(", {e}")).unwrap_or_default(),
+            ),
+        ));
 
+        let out = self.dispatch(data, &info);
+
+        match &out {
+            Ok(r) => self.options.report(crate::Progress::msg(
+                "done",
+                format!(
+                    "converted to {} chars in {:.1}s{}",
+                    r.markdown.chars().count(),
+                    started.elapsed().as_secs_f64(),
+                    if r.degraded { " (degraded — Python engine would add more)" } else { "" },
+                ),
+            )),
+            Err(e) => self.options.report(crate::Progress::msg(
+                "done",
+                format!("failed after {:.1}s: {e}", started.elapsed().as_secs_f64()),
+            )),
+        }
+        out
+    }
+
+    fn dispatch(&self, data: &[u8], info: &StreamInfo) -> Result<ConvertResult, ConvertError> {
         match self.options.engine {
-            Engine::Python => python_engine::convert_with_python(data, &info, &self.options),
-            Engine::Rust => self.convert_rust(data, &info),
+            Engine::Python => {
+                self.options
+                    .report(crate::Progress::msg("python", "delegating to the Python engine…"));
+                python_engine::convert_with_python(data, info, &self.options)
+            }
+            Engine::Rust => self.convert_rust(data, info),
             Engine::Auto => {
-                let rust_result = self.convert_rust(data, &info);
+                let rust_result = self.convert_rust(data, info);
                 // Fall back when Rust failed outright, produced nothing but
                 // advisory comments (e.g. a scanned PDF), or flagged a known
                 // fidelity gap (DOCX comments/equations, RTF-only .msg body,
@@ -111,7 +152,11 @@ impl MarkItDown {
                     Err(_) => true,
                 };
                 if needs_fallback && python_engine::python_engine_available(&self.options) {
-                    match python_engine::convert_with_python(data, &info, &self.options) {
+                    self.options.report(crate::Progress::msg(
+                        "python",
+                        "Rust result is degraded — retrying via the Python engine…",
+                    ));
+                    match python_engine::convert_with_python(data, info, &self.options) {
                         // Only adopt the Python output when it actually adds
                         // content; a degraded-but-useful Rust result beats an
                         // empty Python one (e.g. Python built without the
@@ -134,6 +179,12 @@ impl MarkItDown {
                 continue;
             }
             any_accepted = true;
+            // Cheap coarse signal so heavy non-PDF files (big DOCX/XLSX/ZIP)
+            // visibly show which converter is running, not just "detect".
+            self.options.report(crate::Progress::msg(
+                "convert",
+                format!("converting via {}…", reg.converter.name()),
+            ));
             match reg.converter.convert(data, info, &self.options) {
                 Ok(result) => return Ok(result),
                 Err(e) => last_err = Some(e),
@@ -185,11 +236,15 @@ pub const SUPPORTED_FORMATS: &[FormatInfo] = &[
     FormatInfo { name: "PDF", extensions: &[".pdf"], notes: "text extraction; scanned PDFs need the optional Python engine (OCR)" },
     FormatInfo { name: "Word", extensions: &[".docx"], notes: "headings, tables, lists, hyperlinks" },
     FormatInfo { name: "Excel", extensions: &[".xlsx", ".xls"], notes: "each sheet becomes a Markdown table" },
+    FormatInfo { name: "OpenDocument Sheet", extensions: &[".ods"], notes: "each sheet → Markdown table (calamine; not supported by upstream Python)" },
     FormatInfo { name: "PowerPoint", extensions: &[".pptx"], notes: "slide text, tables, notes" },
     FormatInfo { name: "HTML", extensions: &[".html", ".htm", ".xhtml"], notes: "incl. Wikipedia / Bing SERP / YouTube specializations" },
+    FormatInfo { name: "MHTML (saved webpage)", extensions: &[".mhtml", ".mht"], notes: "extracts the HTML part from the MIME archive (decodes QP/base64)" },
+    FormatInfo { name: "XML", extensions: &[".xml"], notes: "record-style XML → tables, arbitrary XML → nested outline (RSS/Atom handled separately)" },
     FormatInfo { name: "CSV", extensions: &[".csv"], notes: "charset auto-detected, rendered as a table" },
     FormatInfo { name: "Jupyter", extensions: &[".ipynb"], notes: "markdown + code cells" },
     FormatInfo { name: "EPUB", extensions: &[".epub"], notes: "metadata + chapters in spine order" },
+    FormatInfo { name: "MOBI/Kindle", extensions: &[".mobi", ".azw", ".azw3"], notes: "book content → Markdown (not supported by upstream Python)" },
     FormatInfo { name: "ZIP", extensions: &[".zip"], notes: "recursively converts contained files" },
     FormatInfo { name: "Outlook email", extensions: &[".msg"], notes: "headers + plain-text body" },
     FormatInfo { name: "RSS/Atom", extensions: &[".rss", ".atom", ".xml"], notes: "feed items as sections" },

@@ -517,6 +517,23 @@ body {
   border-radius: 999px;
   animation: indeterminate 1.2s ease-in-out infinite;
 }
+/* Determinate variant: width is driven inline by the reported percent. */
+.job-progress-bar.is-determinate {
+  width: 0;
+  animation: none;
+  transition: width 0.3s ease;
+}
+/* Live progress label under the bar, e.g. "45% · page 160/356". */
+.job-progress-label {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 @keyframes indeterminate {
   0% {
     transform: translateX(-100%);
@@ -954,6 +971,15 @@ body {
   outline: none;
   border-color: var(--accent);
 }
+.field-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.field-row-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .field-select {
   cursor: pointer;
   appearance: none;
@@ -1013,4 +1039,26 @@ body {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 2px;
+}
+
+/* Rendered-Markdown extras: slide dividers + advisory notes from converters */
+.md-slide-sep {
+  margin: 1.25rem 0 0.5rem;
+  padding-top: 0.4rem;
+  border-top: 1px dashed var(--border);
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.md-note {
+  display: block;
+  margin: 0.6rem 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--accent, #888);
+  background: color-mix(in srgb, var(--accent, #888) 8%, transparent);
+  border-radius: 4px;
+  font-size: 0.88rem;
+  color: var(--muted);
 }

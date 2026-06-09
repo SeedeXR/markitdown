@@ -22,8 +22,15 @@ const ACCEPTED_XLS_MIME_TYPE_PREFIXES: &[&str] =
     &["application/vnd.ms-excel", "application/excel"];
 const ACCEPTED_XLS_FILE_EXTENSIONS: &[&str] = &[".xls"];
 
+// OpenDocument Spreadsheet. calamine reads ODS natively, so we support it with
+// the same code path — notably, the upstream Python markitdown does NOT.
+const ACCEPTED_ODS_MIME_TYPE_PREFIXES: &[&str] =
+    &["application/vnd.oasis.opendocument.spreadsheet"];
+const ACCEPTED_ODS_FILE_EXTENSIONS: &[&str] = &[".ods"];
+
 pub struct XlsxConverter;
 pub struct XlsConverter;
+pub struct OdsConverter;
 
 fn mimetype_has_prefix(info: &StreamInfo, prefixes: &[&str]) -> bool {
     if let Some(mt) = &info.mimetype {
@@ -43,18 +50,31 @@ fn cell_to_string(cell: &Data) -> String {
 }
 
 /// Convert the spreadsheet bytes into Markdown: one `## sheet` + table per sheet.
-fn convert_workbook(name: &'static str, data: &[u8]) -> Result<ConvertResult, ConvertError> {
+fn convert_workbook(
+    name: &'static str,
+    data: &[u8],
+    opts: &ConvertOptions,
+) -> Result<ConvertResult, ConvertError> {
     let mut workbook = open_workbook_auto_from_rs(Cursor::new(data.to_vec()))
         .map_err(|e| ConvertError::conversion(name, e.to_string()))?;
 
+    let sheets = workbook.sheet_names().to_vec();
+    let total = sheets.len() as u64;
     let mut md = String::new();
-    for sheet in workbook.sheet_names() {
+    for (idx, sheet) in sheets.iter().enumerate() {
         let range = workbook
-            .worksheet_range(&sheet)
+            .worksheet_range(sheet)
             .map_err(|e| ConvertError::conversion(name, e.to_string()))?;
 
+        opts.report(crate::Progress::step(
+            "xlsx",
+            format!("sheet {}/{}: {sheet}", idx + 1, total),
+            idx as u64 + 1,
+            total,
+        ));
+
         md.push_str("## ");
-        md.push_str(&sheet);
+        md.push_str(sheet);
         md.push('\n');
 
         let rows: Vec<Vec<String>> = range
@@ -84,9 +104,9 @@ impl Converter for XlsxConverter {
         &self,
         data: &[u8],
         _info: &StreamInfo,
-        _opts: &ConvertOptions,
+        opts: &ConvertOptions,
     ) -> Result<ConvertResult, ConvertError> {
-        convert_workbook("xlsx", data)
+        convert_workbook("xlsx", data, opts)
     }
 }
 
@@ -104,8 +124,51 @@ impl Converter for XlsConverter {
         &self,
         data: &[u8],
         _info: &StreamInfo,
-        _opts: &ConvertOptions,
+        opts: &ConvertOptions,
     ) -> Result<ConvertResult, ConvertError> {
-        convert_workbook("xls", data)
+        convert_workbook("xls", data, opts)
+    }
+}
+
+impl Converter for OdsConverter {
+    fn name(&self) -> &'static str {
+        "ods"
+    }
+
+    fn accepts(&self, info: &StreamInfo, _data: &[u8]) -> bool {
+        info.extension_is(ACCEPTED_ODS_FILE_EXTENSIONS)
+            || mimetype_has_prefix(info, ACCEPTED_ODS_MIME_TYPE_PREFIXES)
+    }
+
+    fn convert(
+        &self,
+        data: &[u8],
+        _info: &StreamInfo,
+        opts: &ConvertOptions,
+    ) -> Result<ConvertResult, ConvertError> {
+        convert_workbook("ods", data, opts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ods_converter_accepts_ods_only() {
+        let c = OdsConverter;
+        assert!(c.accepts(&StreamInfo::new().with_extension(".ods"), b""));
+        assert!(c.accepts(
+            &StreamInfo::new().with_mimetype("application/vnd.oasis.opendocument.spreadsheet"),
+            b""
+        ));
+        assert!(!c.accepts(&StreamInfo::new().with_extension(".xlsx"), b""));
+    }
+
+    #[test]
+    fn xlsx_xls_accept_their_own_extensions() {
+        assert!(XlsxConverter.accepts(&StreamInfo::new().with_extension(".xlsx"), b""));
+        assert!(XlsConverter.accepts(&StreamInfo::new().with_extension(".xls"), b""));
+        assert!(!XlsxConverter.accepts(&StreamInfo::new().with_extension(".ods"), b""));
     }
 }
