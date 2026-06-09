@@ -7,6 +7,16 @@ app, and the optional Python fallback). Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **One-command MCP installer** (`scripts/install-mcp.{sh,ps1}`), shipped inside
+  every release archive. It locates (or builds) `markitdown-mcp`, runs a
+  JSON-RPC smoke test (asserts all 4 tools), registers the server with **Claude
+  Desktop** (per-OS config path: `~/Library/Application Support/Claude` on macOS,
+  `~/.config/Claude` on Linux, `%APPDATA%\Claude` on Windows — merged, never
+  clobbered, with a `.bak`), and **Claude Code** at **user scope** (every
+  project) via the `claude` CLI, then installs the companion skill to
+  `~/.claude/skills/markitdown/` and reports connection status. Idempotent;
+  flags for a custom binary, the optional Python fallback, build-from-source,
+  and skipping the skill. Windows script is PowerShell 5.1-compatible.
 - **Native YouTube transcripts (no Python needed).** The YouTube converter now
   fetches the video transcript itself, the same way
   [`youtube-transcript-api`](https://github.com/jdepoix/youtube-transcript-api)

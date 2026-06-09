@@ -22,7 +22,46 @@ Supported formats: PDF, DOCX, XLSX/XLS, PPTX, HTML (incl. Wikipedia/Bing/
 YouTube pages), CSV, EPUB, ZIP (recursive), Jupyter notebooks, Outlook `.msg`,
 RSS/Atom, images (EXIF), audio (tags), plain text/JSON.
 
-## Build
+## Quick install (one command)
+
+The fastest path — registers the server with **both** Claude Desktop and
+Claude Code, smoke-tests it, installs the companion skill, and prints
+connection status. Works from a downloaded release archive **or** a source
+checkout; it auto-detects the binary (next to the script, in `target/release`,
+or builds it). Idempotent — safe to re-run.
+
+**macOS / Linux:**
+
+```bash
+cd app           # (or the extracted release folder)
+./scripts/install-mcp.sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+cd app           # (or the extracted release folder)
+.\scripts\install-mcp.ps1
+```
+
+Useful flags (both scripts): `--bin <path>` / `-Bin <path>` to point at a
+specific binary, `--python-bin <path>` / `-PythonBin <path>` to wire the
+optional OCR/transcription fallback into both configs, `--build` / `-Build` to
+compile from source, `--no-skill` / `-NoSkill` to skip the global skill.
+
+Config locations the installer writes (auto-selected per OS):
+| OS | Claude Desktop config |
+|---|---|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+
+Claude Code is registered via the `claude` CLI at **user scope** (every
+project). Existing configs are merged (and backed up to `*.bak`), never
+clobbered. **Restart Claude Desktop** afterwards to load it; Claude Code is
+ready immediately.
+
+## Build (manual)
 
 ```bash
 cd app
@@ -30,10 +69,10 @@ cargo build --release -p markitdown-mcp
 # binary: app/target/release/markitdown-mcp
 ```
 
-## Connect to Claude Code
+## Connect to Claude Code (manual)
 
 ```bash
-claude mcp add markitdown -- /ABSOLUTE/PATH/TO/app/target/release/markitdown-mcp
+claude mcp add markitdown -s user -- /ABSOLUTE/PATH/TO/app/target/release/markitdown-mcp
 ```
 
 Verify with `/mcp` inside Claude Code, or:
@@ -42,10 +81,11 @@ Verify with `/mcp` inside Claude Code, or:
 claude mcp list
 ```
 
-## Connect to Claude Desktop
+## Connect to Claude Desktop (manual)
 
 Add to `claude_desktop_config.json`
 (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`,
+Linux: `~/.config/Claude/claude_desktop_config.json`,
 Windows: `%APPDATA%\Claude\claude_desktop_config.json`):
 
 ```json

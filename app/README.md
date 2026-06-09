@@ -287,15 +287,31 @@ Fully static Linux build: `cargo build --release --target x86_64-unknown-linux-m
 
 ## 2. MCP server (Claude)
 
+**One command** (registers with Claude Desktop **and** Claude Code, smoke-tests
+the server, installs the skill, reports connection — works from a release
+archive or a source checkout, and is idempotent):
+
 ```bash
-claude mcp add markitdown -- "$PWD/target/release/markitdown-mcp"
+./scripts/install-mcp.sh        # macOS / Linux
+.\scripts\install-mcp.ps1       # Windows (PowerShell)
+```
+
+These ship inside every release archive too, so end users just extract and run
+`./install-mcp.sh` / `.\install-mcp.ps1`. Flags: `--bin`/`-Bin`,
+`--python-bin`/`-PythonBin` (wire the OCR/transcription fallback),
+`--build`/`-Build`, `--no-skill`/`-NoSkill`.
+
+Manual instead:
+
+```bash
+claude mcp add markitdown -s user -- "$PWD/target/release/markitdown-mcp"
 ```
 
 Tools: `convert_to_markdown` (paged), `convert_file` (write-to-disk summary
-mode), `convert_batch`, `list_supported_formats`. Full docs + Claude Desktop
-config + smoke test: [`crates/markitdown-mcp/README.md`](crates/markitdown-mcp/README.md).
-Install the companion skill by copying `skill/markitdown/` into
-`~/.claude/skills/` (or a project's `.claude/skills/`).
+mode), `convert_batch`, `list_supported_formats`. Full docs + per-OS Claude
+Desktop config + smoke test: [`crates/markitdown-mcp/README.md`](crates/markitdown-mcp/README.md).
+The installer also drops the companion skill into `~/.claude/skills/markitdown/`
+(every project); to do it by hand, copy `skill/markitdown/` there.
 
 ## 3. Desktop app
 
@@ -388,6 +404,9 @@ On the repo's **Releases** page (one release, all platforms):
 
 - **Standalone binaries** (CLI + MCP, no dependencies) —
   `markitdown-cli-mcp-{linux-x86_64,linux-aarch64,windows-x86_64,macos-x86_64,macos-aarch64}.{tar.gz,zip}`.
+  Each archive also bundles the PDFium library, the companion `SKILL.md`, and
+  the one-command MCP installer (`install-mcp.sh` / `install-mcp.ps1`) — extract
+  and run it to wire the server into Claude Desktop + Claude Code.
 - **Desktop app installers** — macOS `.dmg` **and** a zipped ready-to-run
   `.app` (Intel & Apple Silicon); Linux `.deb` (x86_64 & aarch64) + `.AppImage`
   (x86_64); Windows `.msi` + `-setup.exe`.

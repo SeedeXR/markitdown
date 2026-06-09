@@ -1,6 +1,6 @@
 ---
 name: markitdown
-description: Convert documents (PDF, DOCX, XLSX, PPTX, HTML, CSV, EPUB, ZIP, ipynb, Outlook .msg, RSS, images, audio) to Markdown via the markitdown MCP server. Use whenever the user wants to read, extract, summarize, or transform the contents of such files or URLs.
+description: Convert documents (PDF, DOCX, XLSX/XLS, ODS, PPTX, HTML, MHTML, XML, CSV, EPUB, MOBI/Kindle, ZIP, ipynb, Outlook .msg, RSS/Atom, images, audio) and web pages (incl. Wikipedia/Bing/YouTube — with transcripts) to Markdown via the markitdown MCP server. Use whenever the user wants to read, extract, summarize, or transform the contents of such files or URLs.
 ---
 
 # markitdown MCP — efficient usage
@@ -33,11 +33,12 @@ Four tools on the `markitdown` server. Pick by size and count, not habit:
 
 ## Caveats
 
-- `list_supported_formats` reports whether the Python fallback (OCR,
-  transcription, YouTube transcripts, RTF bodies, DOCX comments/equations)
-  and LLM image captions are available. When the Python engine is configured
-  those all just work via `auto`; when not, scanned PDFs return an
-  HTML-comment note, images → EXIF + dimensions, audio → tags + duration.
-  Check before promising OCR/transcription.
+- YouTube transcripts are fetched natively (no Python needed) when the video
+  has captions. `list_supported_formats` reports whether the Python fallback
+  (OCR, **audio** transcription, RTF bodies, DOCX comments/equations) and LLM
+  image captions are available. When the Python engine is configured those all
+  just work via `auto`; when not, scanned PDFs return an HTML-comment note,
+  images → EXIF + dimensions, audio → tags + duration, and a caption-less
+  YouTube page → metadata only. Check before promising OCR/audio transcription.
 - Failures come back as tool errors with the converter name; the server stays
   alive — no need to reconnect.

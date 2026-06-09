@@ -239,12 +239,19 @@ jobs:
           # Bundle the PDFium library next to the binaries so the fast PDF
           # backend is auto-discovered (next-to-exe). Keep them together.
           cp "$PDFIUM_LIB" "staging/$PDFIUM_LIBNAME"
+          # Ship the one-command MCP installers + the companion skill alongside
+          # the binaries (the installers auto-detect the binary sitting next to
+          # them and register it with Claude Desktop + Claude Code).
+          cp app/scripts/install-mcp.sh staging/
+          cp app/scripts/install-mcp.ps1 staging/
+          cp app/skill/markitdown/SKILL.md staging/
+          chmod +x staging/install-mcp.sh
           (
             cd staging
             if [[ "$RUNNER_OS" == "Windows" ]]; then
-              7z a "../out/markitdown-cli-mcp-$LABEL.zip" "markitdown$EXE" "markitdown-mcp$EXE" "$PDFIUM_LIBNAME"
+              7z a "../out/markitdown-cli-mcp-$LABEL.zip" "markitdown$EXE" "markitdown-mcp$EXE" "$PDFIUM_LIBNAME" install-mcp.sh install-mcp.ps1 SKILL.md
             else
-              tar czf "../out/markitdown-cli-mcp-$LABEL.tar.gz" markitdown markitdown-mcp "$PDFIUM_LIBNAME"
+              tar czf "../out/markitdown-cli-mcp-$LABEL.tar.gz" markitdown markitdown-mcp "$PDFIUM_LIBNAME" install-mcp.sh install-mcp.ps1 SKILL.md
             fi
           )
           # Desktop installers (only the types that exist for this platform).
@@ -416,12 +423,26 @@ jobs:
             macOS (Intel / Apple Silicon). Each artifact was tested and
             smoke-checked on its own OS/arch runner before release.
 
-            **Standalone binaries** (no dependencies):
+            **Standalone binaries** (no dependencies) — each archive bundles the
+            `markitdown` CLI, the `markitdown-mcp` server, the PDFium library,
+            the companion `SKILL.md`, and a one-command MCP installer
+            (`install-mcp.sh` for macOS/Linux, `install-mcp.ps1` for Windows):
             - `markitdown-cli-mcp-linux-x86_64.tar.gz`
             - `markitdown-cli-mcp-linux-aarch64.tar.gz`
             - `markitdown-cli-mcp-windows-x86_64.zip`
             - `markitdown-cli-mcp-macos-x86_64.tar.gz` (Intel)
             - `markitdown-cli-mcp-macos-aarch64.tar.gz` (Apple Silicon)
+
+            **Set up the MCP server in one command** — extract an archive, then:
+            ```bash
+            ./install-mcp.sh           # macOS / Linux
+            ```
+            ```powershell
+            .\install-mcp.ps1          # Windows (PowerShell)
+            ```
+            It smoke-tests the server, registers it with **Claude Desktop**
+            (merging your config) and **Claude Code** (user scope — all
+            projects), installs the skill, and reports connection status.
 
             **Desktop app installers:**
             - macOS: `*.dmg` + `MarkItDown-macos-*.app.zip` (Intel & Apple Silicon)
