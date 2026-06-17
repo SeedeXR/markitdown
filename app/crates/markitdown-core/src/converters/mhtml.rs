@@ -179,10 +179,12 @@ fn decode_quoted_printable(s: &str) -> Vec<u8> {
                 };
                 continue;
             }
-            // `=XX` hex.
+            // `=XX` hex. Decode the two digits byte-wise — slicing the &str as
+            // `&s[i+1..i+3]` would panic when `=` is followed by a multibyte
+            // UTF-8 char (e.g. `=€`), and this is untrusted input.
             if i + 2 < bytes.len() {
-                if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    out.push(b);
+                if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                    out.push(hi * 16 + lo);
                     i += 3;
                     continue;
                 }
@@ -192,6 +194,16 @@ fn decode_quoted_printable(s: &str) -> Vec<u8> {
         i += 1;
     }
     out
+}
+
+/// Value of a single ASCII hex digit, or `None` if not a hex digit.
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -224,5 +236,16 @@ mod tests {
     fn quoted_printable_decodes() {
         assert_eq!(decode_quoted_printable("a=20b=3D"), b"a b=");
         assert_eq!(decode_quoted_printable("line=\r\nwrap"), b"linewrap");
+    }
+
+    #[test]
+    fn quoted_printable_survives_multibyte_after_equals() {
+        // `=` followed by a multibyte char must not panic (it's not valid QP,
+        // so the `=` is emitted literally). Regression for a str-slice panic.
+        let out = decode_quoted_printable("x=€y");
+        assert_eq!(out, "x=€y".as_bytes());
+        // `=` as the final byte, and `=` then a single trailing byte.
+        assert_eq!(decode_quoted_printable("end="), b"end=");
+        assert_eq!(decode_quoted_printable("a=Z"), b"a=Z");
     }
 }

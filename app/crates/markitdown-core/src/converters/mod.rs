@@ -1,6 +1,7 @@
 //! Built-in converters, one module per format. Each mirrors the behavior of
 //! the corresponding `packages/markitdown/src/markitdown/converters/_*.py`.
 
+mod archive;
 mod audio;
 mod bing_serp;
 mod csv;

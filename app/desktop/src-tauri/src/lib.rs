@@ -222,26 +222,48 @@ struct Semaphore {
     inner: Arc<(Mutex<usize>, Condvar)>,
 }
 
+/// RAII permit: returns the slot on drop, so a conversion that panics can't
+/// leak its permit and eventually wedge the queue. Locks recover from
+/// poisoning (`into_inner`) for the same reason.
+#[must_use]
+struct Permit {
+    inner: Arc<(Mutex<usize>, Condvar)>,
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.inner;
+        let mut avail = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *avail += 1;
+        cvar.notify_one();
+    }
+}
+
 impl Semaphore {
     fn new(permits: usize) -> Self {
         Semaphore {
             inner: Arc::new((Mutex::new(permits), Condvar::new())),
         }
     }
-    fn acquire(&self) {
+    fn acquire(&self) -> Permit {
         let (lock, cvar) = &*self.inner;
-        let mut avail = lock.lock().unwrap();
+        let mut avail = lock.lock().unwrap_or_else(|e| e.into_inner());
         while *avail == 0 {
-            avail = cvar.wait(avail).unwrap();
+            avail = cvar.wait(avail).unwrap_or_else(|e| e.into_inner());
         }
         *avail -= 1;
+        Permit {
+            inner: self.inner.clone(),
+        }
     }
-    fn release(&self) {
-        let (lock, cvar) = &*self.inner;
-        let mut avail = lock.lock().unwrap();
-        *avail += 1;
-        cvar.notify_one();
-    }
+}
+
+/// One process-wide semaphore so the concurrency cap holds across *all*
+/// `convert_files` batches — a per-call semaphore let each dropped batch run up
+/// to the limit independently, multiplying real concurrency.
+fn global_sem() -> &'static Semaphore {
+    static SEM: std::sync::OnceLock<Semaphore> = std::sync::OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(concurrency_limit()))
 }
 
 fn emit(app: &AppHandle, update: &JobUpdate) {
@@ -349,18 +371,18 @@ fn run_one(app: &AppHandle, req: &ConvertRequest) {
 
 #[tauri::command]
 fn convert_files(app: AppHandle, requests: Vec<ConvertRequest>) {
-    let sem = Semaphore::new(concurrency_limit());
     for req in requests {
         // Mark queued immediately so the UI reflects the full batch at once.
         emit(&app, &JobUpdate::new(&req.id, &req.path, JobStatus::Queued));
         let app = app.clone();
-        let sem = sem.clone();
         // spawn_blocking: conversions are CPU/IO heavy and must stay off the
         // main thread. Returns immediately; events drive the UI.
         tauri::async_runtime::spawn_blocking(move || {
-            sem.acquire();
+            // Held for the whole conversion; released on drop even if run_one
+            // panics (catch_unwind in the core also turns most panics into
+            // errors, but the guard is the backstop).
+            let _permit = global_sem().acquire();
             run_one(&app, &req);
-            sem.release();
         });
     }
 }
@@ -619,11 +641,25 @@ mod tests {
     #[test]
     fn semaphore_bounds_permits() {
         let sem = Semaphore::new(2);
-        sem.acquire();
-        sem.acquire();
-        sem.release();
-        // A third acquire after one release must succeed without blocking.
-        sem.acquire();
+        let p1 = sem.acquire();
+        let _p2 = sem.acquire();
+        // Dropping a permit returns the slot…
+        drop(p1);
+        // …so a third acquire succeeds without blocking.
+        let _p3 = sem.acquire();
+    }
+
+    #[test]
+    fn permit_released_on_panic_does_not_leak() {
+        // A conversion that panics must still return its permit (RAII), so the
+        // queue can't wedge. Simulate via catch_unwind around an acquire+panic.
+        let sem = Semaphore::new(1);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _permit = sem.acquire();
+            panic!("boom");
+        }));
+        // The permit was released on unwind, so this acquire must not block.
+        let _p = sem.acquire();
     }
 
     #[test]

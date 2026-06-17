@@ -62,9 +62,19 @@ pub fn available(opts: &ConvertOptions) -> bool {
 
 /// Request a caption for the image. Returns `None` on any failure — caption
 /// errors must never break a conversion (metadata is still returned).
+/// Cap on the raw image bytes we'll base64-encode into a request. Beyond this,
+/// the data URI (and the JSON body built from it) would balloon memory for a
+/// request most vision APIs reject anyway, so we skip captioning instead.
+#[cfg(feature = "net")]
+const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+
 #[cfg(feature = "net")]
 pub fn caption_image(data: &[u8], mimetype: &str, cfg: &LlmConfig) -> Option<String> {
     use base64::Engine as _;
+
+    if data.len() > MAX_IMAGE_BYTES {
+        return None;
+    }
 
     let data_uri = format!(
         "data:{};base64,{}",
@@ -87,7 +97,11 @@ pub fn caption_image(data: &[u8], mimetype: &str, cfg: &LlmConfig) -> Option<Str
     });
 
     let url = format!("{}/chat/completions", cfg.api_base.trim_end_matches('/'));
-    let mut resp = ureq::post(&url)
+    // trusted_agent: timeout (so a hung endpoint can't stall the conversion)
+    // but no SSRF guard — the base URL is user-configured and is often a local
+    // LLM (Ollama/LM Studio on localhost), which the SSRF guard would block.
+    let mut resp = crate::net::trusted_agent()
+        .post(&url)
         .header("Authorization", &format!("Bearer {}", cfg.api_key))
         .header("Content-Type", "application/json")
         .send_json(&body)

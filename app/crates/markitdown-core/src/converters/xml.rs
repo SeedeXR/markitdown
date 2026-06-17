@@ -18,6 +18,10 @@ pub struct XmlConverter;
 
 const ACCEPTED_EXTENSIONS: &[&str] = &[".xml"];
 const ACCEPTED_MIME_PREFIXES: &[&str] = &["text/xml", "application/xml"];
+/// Max element nesting. Bounds both the parsed tree depth and the recursive
+/// render, so a deeply-nested document can't overflow the stack. Real-world XML
+/// rarely exceeds a few dozen levels.
+const MAX_DEPTH: usize = 256;
 
 /// A minimal XML element tree carrying tag name, attributes, text and children.
 #[derive(Debug, Default)]
@@ -223,6 +227,11 @@ fn parse_tree(xml: &str) -> Result<Node, String> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
+                // Bound nesting so a deeply-nested document can't overflow the
+                // stack when the tree is later traversed/rendered recursively.
+                if stack.len() >= MAX_DEPTH {
+                    return Err(format!("XML nesting exceeds {MAX_DEPTH} levels"));
+                }
                 let name = local_name(e.name().as_ref());
                 let attrs = read_attrs(&e);
                 stack.push(std::mem::replace(

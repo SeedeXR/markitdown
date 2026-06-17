@@ -231,10 +231,13 @@ fn fetch_transcript(_doc: &Html, _opts: &ConvertOptions) -> Option<String> {
     None
 }
 
-/// GET a URL and return its body as a UTF-8 (lossy) string.
+/// GET a URL and return its body as a UTF-8 (lossy) string. The `baseUrl` comes
+/// from the (untrusted) page JSON, so this uses the SSRF-guarded + timed agent —
+/// an attacker-planted caption URL can't reach internal hosts or hang us.
 #[cfg(feature = "net")]
 fn http_get_string(url: &str) -> Option<String> {
-    let mut resp = ureq::get(url)
+    let mut resp = crate::net::agent()
+        .get(url)
         .header("User-Agent", concat!("markitdown-rs/", env!("CARGO_PKG_VERSION")))
         .call()
         .ok()?;

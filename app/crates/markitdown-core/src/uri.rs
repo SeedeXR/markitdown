@@ -86,7 +86,10 @@ fn read_data_uri(rest: &str, full: &str) -> Result<(Vec<u8>, StreamInfo), Conver
 
 #[cfg(feature = "net")]
 fn read_http(url: &str) -> Result<(Vec<u8>, StreamInfo), ConvertError> {
-    let mut resp = ureq::get(url)
+    // crate::net::agent() applies a request timeout and an SSRF guard that
+    // refuses private/loopback/link-local targets on every redirect hop.
+    let mut resp = crate::net::agent()
+        .get(url)
         .header("User-Agent", concat!("markitdown-rs/", env!("CARGO_PKG_VERSION")))
         .call()
         .map_err(|e| ConvertError::Network(e.to_string()))?;

@@ -22,8 +22,10 @@
 #     unit tests cover the command layer.
 #   * No network / no Python engine needed: all tests are offline; the
 #     python_fallback suite is cfg(unix) + shell stubs.
-#   * macOS builds are unsigned (no certs in CI). They run locally after a
-#     Gatekeeper override; signing/notarization can be added later via secrets.
+#   * macOS builds are AD-HOC signed (codesign -s -): no Apple certs in CI, but
+#     a valid signature so Apple Silicon doesn't report a downloaded app as
+#     "damaged". Users still right-click→Open / clear quarantine once (not
+#     notarized). Full notarization can be added later via secrets.
 #   * Arm64 Linux AppImage tooling is flaky on CI, so that arch ships a .deb
 #     only; x86_64 Linux ships both .deb and AppImage.
 name: app-release
@@ -127,6 +129,14 @@ jobs:
           # Bundle into the desktop app (Tauri resource glob pdfium/*).
           mkdir -p app/desktop/src-tauri/pdfium
           cp "$src" "app/desktop/src-tauri/pdfium/$libname"
+          # macOS: ad-hoc sign the dylib NOW (before Tauri seals it into the
+          # .app and before it's archived next to the CLI/MCP binaries). Apple
+          # Silicon kills unsigned dylibs loaded via dlopen, so an unsigned
+          # PDFium would silently disable the fast PDF backend on arm64.
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            codesign --force --timestamp=none -s - "app/desktop/src-tauri/pdfium/$libname"
+            codesign --force --timestamp=none -s - "$src"
+          fi
           # Export for later steps (CLI/MCP build, smoke, packaging).
           echo "PDFIUM_LIB=$PWD/$src" >> "$GITHUB_ENV"
           echo "PDFIUM_LIBNAME=$libname" >> "$GITHUB_ENV"
@@ -172,6 +182,25 @@ jobs:
       - name: Build CLI + MCP (release, with PDFium)
         working-directory: app
         run: cargo build --release --locked --features pdfium --target ${{ matrix.target }} -p markitdown-cli -p markitdown-mcp
+
+      # macOS: ad-hoc sign the standalone binaries. A downloaded (quarantined),
+      # unsigned arm64 Mach-O is rejected by Gatekeeper ("damaged"/killed); an
+      # ad-hoc signature satisfies the Apple-Silicon requirement so the binary
+      # runs once de-quarantined. Signed BEFORE the smoke test so we exercise
+      # exactly the bytes we ship. (UPX is skipped on macOS, so no conflict
+      # between signing and packing.) codesign works on the cross-built x86_64
+      # binary too.
+      - name: Ad-hoc sign macOS binaries
+        if: runner.os == 'macOS'
+        working-directory: app
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release"
+          for b in markitdown markitdown-mcp; do
+            codesign --force --timestamp=none -s - "$BIN/$b"
+            codesign --verify --strict "$BIN/$b"
+            echo "ad-hoc signed $b"
+          done
 
       # ---- compress the standalone binaries (UPX) -------------------------
       # The release profile already does LTO + strip + opt-level="s". UPX
@@ -223,7 +252,9 @@ jobs:
       - name: Build desktop app (Tauri)
         working-directory: app/desktop
         # beforeBuildCommand in tauri.conf.json runs `npm run build` (the
-        # frontend) automatically. Unsigned on macOS (no CI certs).
+        # frontend) automatically. On macOS, tauri.conf.json sets
+        # bundle.macOS.signingIdentity="-", so Tauri ad-hoc signs the .app
+        # (and the dmg wraps the signed app) — no Apple certs needed.
         run: npm run tauri build -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
       # ---- collect everything into out/ -----------------------------------
@@ -274,6 +305,11 @@ jobs:
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             APP=$(find "$BUNDLE/macos" -maxdepth 1 -name '*.app' -type d 2>/dev/null | head -1 || true)
             if [[ -n "$APP" ]]; then
+              # Fail loudly if the bundle isn't validly (ad-hoc) signed — an
+              # unsigned/broken signature is exactly what makes a downloaded
+              # app report as "damaged" on Apple Silicon.
+              codesign --verify --deep --strict --verbose=2 "$APP"
+              echo "code signature OK: $(codesign -dvv "$APP" 2>&1 | grep -i 'Signature\|Identifier' | head -2)"
               ditto -c -k --keepParent "$APP" "out/MarkItDown-$LABEL.app.zip"
               installers=$((installers + 1))
             fi
@@ -494,5 +530,15 @@ jobs:
 
             - `SHA256SUMS.txt` — checksums for every asset.
 
-            macOS builds are unsigned; right-click → Open (or
-            `xattr -dr com.apple.quarantine <app>`) on first launch.
+            **macOS — first launch.** Builds are **ad-hoc signed** (valid
+            signature, but not notarized — no Apple Developer certs in CI), so
+            macOS still asks you to confirm the first launch. The app is **not**
+            damaged:
+            - **Desktop app:** drag `MarkItDown.app` to `/Applications`, then
+              **right-click → Open** once (or run
+              `xattr -dr com.apple.quarantine /Applications/MarkItDown.app`).
+            - **CLI / MCP binaries:** after extracting, clear quarantine once:
+              `xattr -dr com.apple.quarantine markitdown markitdown-mcp libpdfium.dylib`.
+            If you ever see "is damaged and can't be opened", it's the Gatekeeper
+            quarantine flag from the download — the `xattr -dr` command above
+            clears it.

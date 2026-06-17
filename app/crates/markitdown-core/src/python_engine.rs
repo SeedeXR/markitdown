@@ -139,8 +139,10 @@ pub fn convert_with_python(
     cmd.arg("-p");
     // Extra pass-through args, e.g. Azure Document Intelligence:
     //   MARKITDOWN_PY_ARGS="-d -e https://<resource>.cognitiveservices.azure.com/"
+    // Quote-aware split so a value containing spaces (a Windows path, a prompt)
+    // stays a single argument instead of being shattered on whitespace.
     if let Ok(extra) = std::env::var(PY_ARGS_ENV) {
-        cmd.args(extra.split_whitespace());
+        cmd.args(split_args(&extra));
     }
 
     // Choose how to hand the input over, in order of fidelity:
@@ -262,6 +264,47 @@ pub fn convert_with_python(
 /// Drain the child's pipes on a worker thread and enforce a wall-clock
 /// timeout; the child is killed when it expires so a hung Python process can
 /// never wedge a batch job.
+/// Split a command-argument string into argv, honoring single/double quotes so
+/// a quoted value with spaces (a path, a prompt) stays one argument. Minimal —
+/// no backslash escapes — which is all `MARKITDOWN_PY_ARGS` needs.
+fn split_args(s: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut has_token = false;
+    for c in s.chars() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else {
+                    cur.push(c);
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    has_token = true; // even `""` yields an (empty) argument
+                }
+                _ if c.is_whitespace() => {
+                    if has_token {
+                        args.push(std::mem::take(&mut cur));
+                        has_token = false;
+                    }
+                }
+                _ => {
+                    cur.push(c);
+                    has_token = true;
+                }
+            },
+        }
+    }
+    if has_token {
+        args.push(cur);
+    }
+    args
+}
+
 fn wait_with_timeout(
     mut child: std::process::Child,
     limit: std::time::Duration,
@@ -328,4 +371,26 @@ fn wait_with_timeout(
         stdout,
         stderr,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_args;
+
+    #[test]
+    fn split_args_handles_quotes_and_spaces() {
+        assert_eq!(split_args("-d -e https://x/"), ["-d", "-e", "https://x/"]);
+        // A quoted value with spaces stays one argument.
+        assert_eq!(
+            split_args(r#"--prompt "a b c" -x"#),
+            ["--prompt", "a b c", "-x"]
+        );
+        assert_eq!(
+            split_args(r#"-f 'C:\Program Files\m.exe'"#),
+            ["-f", r"C:\Program Files\m.exe"]
+        );
+        assert_eq!(split_args("   "), Vec::<String>::new());
+        // Empty quotes produce an explicit empty argument.
+        assert_eq!(split_args(r#"a "" b"#), ["a", "", "b"]);
+    }
 }

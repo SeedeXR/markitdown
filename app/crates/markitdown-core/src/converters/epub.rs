@@ -7,7 +7,6 @@
 //! is emitted first, exactly as the Python converter does.
 
 use std::collections::HashMap;
-use std::io::Read;
 
 use htmd::options::{BulletListMarker, Options};
 use htmd::HtmlToMarkdown;
@@ -80,7 +79,11 @@ impl Converter for EpubConverter {
             .build();
 
         let mut chapters: Vec<String> = Vec::new();
-        for idref in &pkg.spine {
+        // Bound total spine items and cumulative decompressed text, so a
+        // manifest that points thousands of spine entries at one big chapter
+        // can't be a CPU/memory DoS.
+        let mut budget = super::archive::MAX_TOTAL_BYTES;
+        for idref in pkg.spine.iter().take(super::archive::MAX_ENTRIES) {
             let Some(href) = pkg.manifest.get(idref) else {
                 continue;
             };
@@ -90,6 +93,11 @@ impl Converter for EpubConverter {
                 format!("{base_path}/{href}")
             };
             if let Some(html) = read_entry(&mut zip, &full) {
+                let len = html.len() as u64;
+                if len > budget {
+                    break;
+                }
+                budget -= len;
                 if let Ok(markdown) = converter.convert(&html) {
                     chapters.push(markdown.trim().to_string());
                 }
@@ -117,10 +125,7 @@ impl Converter for EpubConverter {
 }
 
 fn read_entry(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Option<String> {
-    let mut file = zip.by_name(name).ok()?;
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
-    Some(buf)
+    super::archive::read_capped_string(zip, name, super::archive::MAX_ENTRY_BYTES)
 }
 
 fn find_opf_path(container_xml: &str) -> Option<String> {

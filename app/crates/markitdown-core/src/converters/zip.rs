@@ -18,6 +18,11 @@ use crate::{Converter, ConvertError, ConvertOptions, ConvertResult, StreamInfo};
 const ACCEPTED_EXTENSIONS: &[&str] = &[".zip"];
 const ACCEPTED_MIME_PREFIXES: &[&str] = &["application/zip"];
 const MAX_DEPTH: u32 = 4;
+/// Zip-bomb / resource caps (per archive): the most entries we expand, the
+/// largest single entry we decompress, and the total decompressed budget.
+const MAX_ENTRIES: usize = 4096;
+const MAX_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
 thread_local! {
     static DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -71,17 +76,37 @@ impl Converter for ZipConverter {
         // MarkItDown instance for the inner files.
         let engine = crate::MarkItDown::with_options(opts.clone());
 
-        let names: Vec<String> = (0..zip.len())
-            .filter_map(|i| zip.by_index(i).ok().map(|f| f.name().to_string()))
-            .collect();
         let mut degraded = false;
+        let entry_count = zip.len();
+        // Entry-count cap: a "zip of millions of tiny files" is a cheap DoS.
+        let count = entry_count.min(MAX_ENTRIES);
+        if entry_count > MAX_ENTRIES {
+            md.push_str(&format!(
+                "> Archive has {entry_count} entries; only the first {MAX_ENTRIES} were processed.\n\n"
+            ));
+            degraded = true;
+        }
 
-        // Count non-directory entries for percentage.
-        let total = names.iter().filter(|n| !n.ends_with('/')).count() as u64;
+        // Non-directory entries in the processed range (for the progress total).
+        // Iterate by index throughout — `by_name` is a linear scan (O(N²) here).
+        let total = (0..count)
+            .filter(|&i| {
+                zip.by_index(i)
+                    .map(|f| !f.is_dir() && !f.name().ends_with('/'))
+                    .unwrap_or(false)
+            })
+            .count() as u64;
         let mut done = 0u64;
-        for name in names {
-            // Skip directory entries.
-            if name.ends_with('/') {
+        // Cumulative decompression budget for the whole archive (zip-bomb guard).
+        let mut budget = MAX_TOTAL_BYTES;
+
+        for i in 0..count {
+            let mut file = match zip.by_index(i) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            let name = file.name().to_string();
+            if file.is_dir() || name.ends_with('/') {
                 continue;
             }
             done += 1;
@@ -91,20 +116,35 @@ impl Converter for ZipConverter {
                 done,
                 total,
             ));
-            let mut bytes = Vec::new();
-            {
-                let mut file = match zip.by_name(&name) {
-                    Ok(f) => f,
-                    Err(_) => continue,
-                };
-                if file.is_dir() {
-                    continue;
-                }
-                if file.read_to_end(&mut bytes).is_err() {
-                    md.push_str(&format!("## File: {name}\n\n> Failed to read entry.\n\n"));
-                    continue;
-                }
+
+            // Zip-bomb guard: reject an entry whose declared uncompressed size
+            // is huge, and hard-cap the actual read at the smaller of the
+            // per-entry limit and the archive's remaining budget — defending
+            // against a lying header too. `take(cap + 1)` lets us detect overrun.
+            if file.size() > MAX_ENTRY_BYTES {
+                md.push_str(&format!(
+                    "## File: {name}\n\n> Skipped: entry exceeds the per-file size limit.\n\n"
+                ));
+                degraded = true;
+                continue;
             }
+            let cap = MAX_ENTRY_BYTES.min(budget);
+            let mut bytes = Vec::new();
+            if (&mut file).take(cap + 1).read_to_end(&mut bytes).is_err() {
+                md.push_str(&format!("## File: {name}\n\n> Failed to read entry.\n\n"));
+                degraded = true;
+                continue;
+            }
+            drop(file);
+            if bytes.len() as u64 > cap {
+                md.push_str(&format!(
+                    "## File: {name}\n\n> Skipped: archive exceeds the {}-MiB decompression limit.\n\n",
+                    MAX_TOTAL_BYTES / (1024 * 1024)
+                ));
+                degraded = true;
+                break; // budget exhausted — stop expanding the rest
+            }
+            budget -= bytes.len() as u64;
 
             let ext = std::path::Path::new(&name)
                 .extension()

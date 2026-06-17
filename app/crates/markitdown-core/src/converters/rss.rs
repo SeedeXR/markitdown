@@ -16,6 +16,8 @@ const PRECISE_MIME_PREFIXES: &[&str] = &[
 const PRECISE_EXTENSIONS: &[&str] = &[".rss", ".atom"];
 const CANDIDATE_MIME_PREFIXES: &[&str] = &["text/xml", "application/xml"];
 const CANDIDATE_EXTENSIONS: &[&str] = &[".xml"];
+/// Max element nesting before we reject the feed (guards recursive traversal).
+const MAX_DEPTH: usize = 256;
 
 pub struct RssConverter;
 
@@ -82,6 +84,12 @@ fn parse_tree(xml: &str) -> Result<Node, String> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
+                // Bound nesting: the tree is later searched recursively
+                // (`first_descendant`/`descendants`), so cap depth to avoid a
+                // stack overflow on a pathologically nested feed.
+                if stack.len() >= MAX_DEPTH {
+                    return Err(format!("XML nesting exceeds {MAX_DEPTH} levels"));
+                }
                 let name = qname_to_string(e.name().as_ref());
                 stack.push(std::mem::replace(
                     &mut current,

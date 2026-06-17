@@ -15,7 +15,6 @@
 //! the full base64 payload is kept.
 
 use std::collections::HashMap;
-use std::io::Read;
 
 use base64::Engine as _;
 use quick_xml::escape::unescape;
@@ -101,26 +100,24 @@ struct DocxContext<'a> {
 }
 
 fn read_entry(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Option<String> {
-    let mut file = zip.by_name(name).ok()?;
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
-    Some(buf)
+    super::archive::read_capped_string(zip, name, super::archive::MAX_ENTRY_BYTES)
 }
 
 fn collect_media(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>) -> HashMap<String, Vec<u8>> {
+    use super::archive::{read_capped, MAX_ENTRIES, MAX_ENTRY_BYTES, MAX_TOTAL_BYTES};
     let mut out = HashMap::new();
-    let names: Vec<String> = (0..zip.len())
+    let names: Vec<String> = (0..zip.len().min(MAX_ENTRIES))
         .filter_map(|i| zip.by_index(i).ok().map(|f| f.name().to_string()))
         .filter(|n| n.starts_with("word/media/"))
         .collect();
+    let mut budget = MAX_TOTAL_BYTES;
     for name in names {
-        if let Ok(mut f) = zip.by_name(&name) {
-            let mut data = Vec::new();
-            if f.read_to_end(&mut data).is_ok() {
-                // Key on the basename so we can resolve "media/imageN.png" targets.
-                let base = name.rsplit('/').next().unwrap_or(&name).to_string();
-                out.insert(base, data);
-            }
+        let cap = MAX_ENTRY_BYTES.min(budget);
+        if let Some(data) = read_capped(zip, &name, cap) {
+            budget -= data.len() as u64;
+            // Key on the basename so we can resolve "media/imageN.png" targets.
+            let base = name.rsplit('/').next().unwrap_or(&name).to_string();
+            out.insert(base, data);
         }
     }
     out

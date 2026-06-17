@@ -55,6 +55,21 @@ fn convert_workbook(
     data: &[u8],
     opts: &ConvertOptions,
 ) -> Result<ConvertResult, ConvertError> {
+    // xlsx/ods are zip containers and can be decompression bombs. calamine
+    // reads/inflates internally (we can't bound it from outside), so reject an
+    // archive whose declared uncompressed size or entry count is over budget
+    // up front. .xls is legacy OLE/BIFF (not a zip), so skip the check there.
+    if data.starts_with(b"PK") {
+        if let Ok(mut z) = zip::ZipArchive::new(Cursor::new(data)) {
+            if !super::archive::within_budget(&mut z) {
+                return Err(ConvertError::conversion(
+                    name,
+                    "spreadsheet archive exceeds the decompression budget",
+                ));
+            }
+        }
+    }
+
     let mut workbook = open_workbook_auto_from_rs(Cursor::new(data.to_vec()))
         .map_err(|e| ConvertError::conversion(name, e.to_string()))?;
 

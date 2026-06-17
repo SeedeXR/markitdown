@@ -159,7 +159,51 @@ app, and the optional Python fallback). Format loosely follows
 ### Changed
 - CLI default engine is `auto` (transparent Python fallback when configured).
 
+### Security / robustness (whole-repo review pass)
+- **SSRF guard + timeouts on all outbound HTTP** (new `net` module). Fetching an
+  untrusted URL (a `convert_to_markdown` URI, or a YouTube caption `baseUrl`
+  read from page JSON) now goes through a resolver that refuses
+  private/loopback/link-local/cloud-metadata targets — enforced on **every
+  redirect hop** — plus a 30s global timeout. User-configured LLM endpoints use
+  a timeout-only "trusted" agent so local models (`http://localhost:…`) still
+  work. Override the guard with `MARKITDOWN_ALLOW_LOCAL_URLS=1`. LLM captioning
+  also caps image size before encoding.
+- **No converter can crash the host.** Converter dispatch is wrapped in
+  `catch_unwind`, so a malformed/malicious file that trips a panic deep in a
+  third-party parser (calamine, mobi, exif, quick-xml, …) becomes a clean
+  conversion error instead of aborting the CLI/MCP/desktop process.
+- **Zip-bomb / decompression caps** for every zip-based format (ZIP, DOCX,
+  PPTX, XLSX/ODS, EPUB): per-entry size, per-archive total, and entry-count
+  limits, so a small crafted file can't exhaust memory. The recursive ZIP
+  converter also switched from `by_name` (O(N²)) to `by_index`.
+- **MHTML quoted-printable decoder** no longer panics on a multibyte char after
+  `=` (byte-wise hex decode instead of a `&str` slice).
+- **XML/RSS nesting is depth-capped** (256) so a deeply-nested document can't
+  overflow the stack during recursive traversal.
+- **Batch output names are unique** (CLI and MCP `convert_batch`): two inputs
+  sharing a basename in different directories no longer silently overwrite each
+  other; the MCP server also rejects `..` traversal in output paths.
+- **Desktop concurrency fix:** the conversion semaphore is now a single
+  process-wide instance with an RAII permit, so the limit holds across batches
+  and a panicking conversion can't leak a permit and wedge the queue.
+- **Misc hardening:** `MARKITDOWN_PY_ARGS` is split quote-aware (paths/prompts
+  with spaces survive); the CLI logs to stderr via a BrokenPipe-safe macro (a
+  batch worker can't panic on `… | head`); the desktop Markdown preview's
+  italic/underscore regexes no longer eat a neighbouring character.
+
 ### Fixed
+- **macOS downloads no longer report as "damaged".** The desktop `.app`/`.dmg`
+  and the standalone `markitdown`/`markitdown-mcp` binaries (and the bundled
+  PDFium dylib) are now **ad-hoc code-signed** (`codesign -s -`). On Apple
+  Silicon a quarantined *unsigned* binary is rejected by Gatekeeper as
+  "damaged"; an ad-hoc signature is a valid signature, so the app/binaries open
+  via the normal right-click→Open / `xattr -dr com.apple.quarantine` path
+  instead. Done via `bundle.macOS.signingIdentity = "-"` in `tauri.conf.json`
+  (Tauri signs the app and wraps it in the dmg) plus `codesign` steps in the
+  release workflow for the dylib and CLI/MCP binaries; the workflow also
+  `codesign --verify`s the bundle before packaging. Still **not notarized** (no
+  Apple certs in CI), so first launch still needs the one-time Gatekeeper
+  confirmation.
 - **Python-engine heartbeat is now emitted immediately** when the subprocess
   starts (a `Python engine running… 0s elapsed` tick) instead of only after the
   first ~2s sleep slice. This removes a thread-scheduling race where a fast

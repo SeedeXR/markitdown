@@ -424,8 +424,13 @@ On the repo's **Releases** page (one release, all platforms):
 > the x86_64 binary is still actually run in the smoke test before release.
 - `SHA256SUMS.txt` — checksums for every asset.
 
-macOS builds are **unsigned** (no certs in CI): right-click → Open, or
-`xattr -dr com.apple.quarantine <app>` on first launch.
+macOS builds are **ad-hoc signed** (`codesign -s -`) — a valid signature (so
+Apple Silicon won't report a downloaded app as "damaged"), but **not notarized**
+(no Apple Developer certs in CI). On first launch:
+- **Desktop app:** drag to `/Applications`, then right-click → **Open** once, or
+  `xattr -dr com.apple.quarantine /Applications/MarkItDown.app`.
+- **CLI / MCP:** clear quarantine once after extracting —
+  `xattr -dr com.apple.quarantine markitdown markitdown-mcp libpdfium.dylib`.
 
 ### Why only CI ran when I pushed a tag
 

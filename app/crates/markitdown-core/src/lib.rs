@@ -24,6 +24,8 @@ mod error;
 mod llm_caption;
 mod llm_providers;
 mod markitdown;
+#[cfg(feature = "net")]
+mod net;
 mod options;
 mod progress;
 mod python_engine;

@@ -97,6 +97,22 @@ fn internal(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
 
+/// Reject a caller-supplied output path that contains a `..` component, so a
+/// client (or a model coaxed by document content) can't traverse out of the
+/// intended location when writing converted files.
+fn reject_traversal(p: &str) -> std::io::Result<()> {
+    if std::path::Path::new(p)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "output path must not contain '..'",
+        ));
+    }
+    Ok(())
+}
+
 #[tool_router]
 impl MarkitdownServer {
     pub fn new() -> Self {
@@ -157,6 +173,7 @@ impl MarkitdownServer {
 
         match &req.output_path {
             Some(dest) => {
+                reject_traversal(dest).map_err(internal)?;
                 std::fs::write(dest, result.markdown.as_bytes()).map_err(internal)?;
                 let preview: String = result.markdown.chars().take(500).collect();
                 Ok(ok_text(format!(
@@ -178,19 +195,40 @@ impl MarkitdownServer {
     ) -> Result<CallToolResult, McpError> {
         let report = tokio::task::spawn_blocking(move || {
             use rayon::prelude::*;
+            reject_traversal(&req.output_dir)?;
             std::fs::create_dir_all(&req.output_dir)?;
-            let lines: Vec<String> = req
+            // Assign a UNIQUE output name per input up front (sequential, so it's
+            // deterministic): two inputs with the same basename in different
+            // dirs would otherwise both write `<name>.md` and silently clobber
+            // one another. `-N` is appended on collision.
+            let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let jobs: Vec<(&String, std::path::PathBuf)> = req
                 .paths
-                .par_iter()
+                .iter()
                 .map(|p| {
-                    let name = std::path::Path::new(p)
+                    let base = std::path::Path::new(p)
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "output".into());
-                    let dest = std::path::Path::new(&req.output_dir).join(format!("{name}.md"));
+                    let fname = format!("{base}.md");
+                    let n = seen.entry(fname.clone()).or_insert(0);
+                    let unique = if *n == 0 {
+                        fname.clone()
+                    } else if let Some(stem) = fname.strip_suffix(".md") {
+                        format!("{stem}-{n}.md")
+                    } else {
+                        format!("{fname}-{n}")
+                    };
+                    *n += 1;
+                    (p, std::path::Path::new(&req.output_dir).join(unique))
+                })
+                .collect();
+            let lines: Vec<String> = jobs
+                .par_iter()
+                .map(|(p, dest)| {
                     match engine(req.engine.as_deref())
                         .convert_path(p)
-                        .and_then(|r| Ok(std::fs::write(&dest, r.markdown.as_bytes())?))
+                        .and_then(|r| Ok(std::fs::write(dest, r.markdown.as_bytes())?))
                     {
                         Ok(()) => format!("ok: {p} -> {}", dest.display()),
                         Err(e) => format!("FAILED: {p}: {e}"),

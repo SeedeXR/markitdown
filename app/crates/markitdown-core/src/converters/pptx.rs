@@ -21,7 +21,6 @@
 //! LLM captioning is not performed.
 
 use std::collections::HashMap;
-use std::io::Read;
 
 use base64::Engine as _;
 use quick_xml::escape::unescape;
@@ -98,7 +97,7 @@ impl Converter for PptxConverter {
             let slide_md = render_slide(&xml, &rels, &parts, opts.keep_data_uris);
             md.push_str(slide_md.trim());
 
-            if let Some(notes) = slide_notes(slide_num, &parts) {
+            if let Some(notes) = slide_notes(&rels, &parts) {
                 if !notes.trim().is_empty() {
                     md.push_str("\n\n### Notes:\n");
                     md.push_str(notes.trim());
@@ -123,16 +122,19 @@ fn basename(path: &str) -> &str {
 }
 
 fn read_all(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>) -> HashMap<String, Vec<u8>> {
+    use super::archive::{read_capped, MAX_ENTRIES, MAX_ENTRY_BYTES, MAX_TOTAL_BYTES};
     let mut out = HashMap::new();
-    let names: Vec<String> = (0..zip.len())
+    let names: Vec<String> = (0..zip.len().min(MAX_ENTRIES))
         .filter_map(|i| zip.by_index(i).ok().map(|f| f.name().to_string()))
         .collect();
+    // Cap each part and the running total: every part is held in memory at
+    // once, so a crafted .pptx whose parts inflate to many GB would OOM.
+    let mut budget = MAX_TOTAL_BYTES;
     for name in names {
-        if let Ok(mut f) = zip.by_name(&name) {
-            let mut buf = Vec::new();
-            if f.read_to_end(&mut buf).is_ok() {
-                out.insert(name, buf);
-            }
+        let cap = MAX_ENTRY_BYTES.min(budget);
+        if let Some(buf) = read_capped(zip, &name, cap) {
+            budget -= buf.len() as u64;
+            out.insert(name, buf);
         }
     }
     out
@@ -540,11 +542,38 @@ fn resolve_relative(base_dir: &str, target: &str) -> String {
     segments.join("/")
 }
 
-fn slide_notes(slide_num: usize, parts: &HashMap<String, Vec<u8>>) -> Option<String> {
-    let name = format!("ppt/notesSlides/notesSlide{slide_num}.xml");
-    let bytes = parts.get(&name)?;
-    let xml = String::from_utf8_lossy(bytes);
-    Some(extract_text(&xml))
+fn slide_notes(
+    rels: &HashMap<String, String>,
+    parts: &HashMap<String, Vec<u8>>,
+) -> Option<String> {
+    // Resolve the notes part via the slide's relationships rather than assuming
+    // `notesSlide{N}.xml` matches the slide's 1-based position — PowerPoint does
+    // not guarantee that (notes may be sparse or renumbered), which previously
+    // attached notes to the wrong slide or dropped them.
+    let target = rels.values().find(|t| t.contains("notesSlide"))?;
+    let full = resolve_part_path("ppt/slides", target);
+    let bytes = parts.get(&full)?;
+    Some(extract_text(&String::from_utf8_lossy(bytes)))
+}
+
+/// Resolve an OOXML relationship target (relative to the referencing part's
+/// folder, e.g. `../notesSlides/notesSlide2.xml`) to a full part path.
+fn resolve_part_path(base_dir: &str, target: &str) -> String {
+    let mut dir: Vec<&str> = if target.starts_with('/') {
+        Vec::new()
+    } else {
+        base_dir.split('/').filter(|s| !s.is_empty()).collect()
+    };
+    for seg in target.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                dir.pop();
+            }
+            s => dir.push(s),
+        }
+    }
+    dir.join("/")
 }
 
 /// Concatenate all `a:t` text runs, separating `a:p` paragraphs with newlines.

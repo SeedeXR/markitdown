@@ -185,9 +185,23 @@ impl MarkItDown {
                 "convert",
                 format!("converting via {}…", reg.converter.name()),
             ));
-            match reg.converter.convert(data, info, &self.options) {
-                Ok(result) => return Ok(result),
-                Err(e) => last_err = Some(e),
+            // Isolate converter panics here so a malformed/malicious file that
+            // trips an `unwrap`/index/overflow inside a third-party parser
+            // (calamine, mobi, exif, quick-xml, …) becomes a clean conversion
+            // error instead of aborting the host (CLI/MCP/desktop). Requires
+            // panic=unwind (set in the release profile).
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reg.converter.convert(data, info, &self.options)
+            }));
+            match outcome {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(e)) => last_err = Some(e),
+                Err(_) => {
+                    last_err = Some(ConvertError::conversion(
+                        reg.converter.name(),
+                        "converter panicked on this input (treated as a conversion failure)",
+                    ));
+                }
             }
         }
         if any_accepted {
