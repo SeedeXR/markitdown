@@ -24,7 +24,13 @@ serde_json = "1"
 markitdown-core = { path = "../../crates/markitdown-core", features = ["pdfium"] }
 
 [profile.release]
-panic = "abort"
+# panic MUST stay "unwind". The PDF parser (pdf-extract/lopdf) panics on
+# malformed documents and `pdf.rs` recovers via catch_unwind. With
+# panic = "abort" that recovery is impossible and the whole app dies the
+# instant a user drops a slightly-broken PDF on it — which is exactly what
+# happened in installed/DMG builds (dev builds unwind, so it never reproduced
+# under `tauri dev`).
+panic = "unwind"
 codegen-units = 1
 lto = true
 opt-level = "s"

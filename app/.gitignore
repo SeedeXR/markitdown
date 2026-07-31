@@ -44,3 +44,7 @@ test_files/
 # Bundled PDFium libs (downloaded at release time); keep only the README.
 desktop/src-tauri/pdfium/*
 !desktop/src-tauri/pdfium/README.md
+
+# Bundled PyInstaller Python engine (staged at release time); keep the README.
+desktop/src-tauri/python-engine/*
+!desktop/src-tauri/python-engine/README.md

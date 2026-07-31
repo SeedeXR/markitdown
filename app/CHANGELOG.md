@@ -6,7 +6,59 @@ app, and the optional Python fallback). Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+- **Desktop app no longer dies when given a malformed PDF.** `desktop/src-tauri`
+  had `panic = "abort"` in its release profile, which makes the PDF converter's
+  `catch_unwind` recovery a no-op — so an *installed* (DMG/MSI/deb) build
+  terminated the instant a user dropped a slightly-broken PDF on the window,
+  while `tauri dev` (an unwinding profile) never reproduced it. The profile now
+  matches the workspace (`panic = "unwind"`), and both the core and desktop test
+  suites assert the strategy directly so it cannot regress.
+- **A malformed page no longer costs the whole PDF.** `pdf-extract` panics on
+  content streams it cannot parse (a common real-world case). Extraction now
+  runs per page under `catch_unwind`, so a bad page is skipped and the rest of
+  the document still converts; only a document where *every* page fails returns
+  an error. Recovered panics no longer print a crash report to stderr.
+- **Words no longer glue together in justified PDF text.** Glyph extents are now
+  measured as advance boxes on both backends (PDFium via `loose_bounds`), and
+  the word-gap threshold matches the one `pdf-extract` has long used.
+- **Descenders no longer drop letters.** The PDFium path grouped lines by glyph
+  bounding-box bottom, which puts every `p`/`g`/`y` on a line of its own and
+  silently corrupted words ("FinScope" → "FinSco e"). It now groups by baseline.
+- **Python engine is found by installed apps.** A GUI app launched from
+  Finder/Dock — and an MCP server spawned by a host — inherits neither
+  `MARKITDOWN_PY_BIN` nor a useful `PATH`, so an installed engine was invisible
+  to exactly the builds that needed it. Discovery now also probes the macOS
+  `.app` `Contents/Resources` directory, a `python-engine/` subdirectory, and the
+  standard user install prefixes (`~/.local/share/markitdown`, `~/.local/bin`,
+  `/usr/local/bin`, `%LOCALAPPDATA%\markitdown`, …).
+
 ### Added
+- **PDF structure reconstruction.** PDFs previously converted to linear plain
+  text. Both backends now emit positioned glyphs which
+  `converters/pdf_layout.rs` turns into real Markdown: headings from font size
+  relative to the document's modal body size, GFM tables from column-aligned
+  cell runs, bold/italic from font weight and style flags (PDFium backend only —
+  `pdf-extract` never exposes the font), bullet/numbered lists, re-flowed
+  paragraphs with de-hyphenation, column-by-column reading order on two-column
+  pages, and running heads/feet dropped. Benchmarked at parity with the previous
+  plain-text path (PDFium +3%, pure-Rust unchanged).
+- **The desktop app can bundle the Python engine.** Stage a PyInstaller build in
+  `desktop/src-tauri/python-engine/` before `tauri build` and it ships inside the
+  installer; the app points `MARKITDOWN_PY_BIN` at it on startup. Optional —
+  the directory holds only a README by default, since the engine adds
+  ~150–400 MB to the installer.
+- **Client-side redirects are followed.** A page that redirects via
+  `<meta http-equiv="refresh">` (including inside `<noscript>`, where the HTML
+  parser would otherwise treat it as text) used to convert to "Click here to be
+  redirected"; the real page is now fetched, bounded to 3 hops and behind the
+  same SSRF-guarded agent.
+- **Cleaner web-page conversion.** The converter now prefers a page's
+  `<main>`/`<article>`/`[role=main]` container when it unambiguously holds the
+  content, skips non-content elements (`nav`, `aside`, `noscript`, `iframe`,
+  `form`, …), honours an in-document `<meta charset>` when the HTTP header omits
+  one, and sends browser-like `Accept`/`User-Agent` headers. Redirects are
+  capped and never replay `Authorization` across hosts.
 - **One-command MCP installer** (`scripts/install-mcp.{sh,ps1}`), shipped inside
   every release archive. It locates (or builds) `markitdown-mcp`, runs a
   JSON-RPC smoke test (asserts all 4 tools), registers the server with **Claude

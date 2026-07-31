@@ -36,7 +36,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "pdfium/*"
+      "pdfium/*",
+      "python-engine/**/*"
     ],
     "macOS": {
       "signingIdentity": "-"

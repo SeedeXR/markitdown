@@ -450,17 +450,42 @@ fn capabilities(llm: Option<LlmCfg>, python_bin: Option<String>) -> CoreCapabili
     core_capabilities(&opts)
 }
 
+/// Locate a bundled `markitdown-py` under the app's resource directory,
+/// accepting both PyInstaller layouts: a one-file binary
+/// (`python-engine/markitdown-py`) and an onedir folder
+/// (`python-engine/markitdown-py/markitdown-py`).
+pub fn find_python_engine(resources: &Path) -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) {
+        "markitdown-py.exe"
+    } else {
+        "markitdown-py"
+    };
+    for dir in [resources.join("python-engine"), resources.to_path_buf()] {
+        let one = dir.join(name);
+        if one.is_file() {
+            return Some(one);
+        }
+        let onedir = dir.join("markitdown-py").join(name);
+        if onedir.is_file() {
+            return Some(onedir);
+        }
+    }
+    None
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use tauri::Manager;
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let resources = app.path().resource_dir().ok();
+
             // If a PDFium library is bundled with the app, point the engine at
             // it so the fast PDF backend works with zero config in an installed
             // app. The user's MARKITDOWN_PDFIUM_LIB (if set) always wins.
             if std::env::var_os("MARKITDOWN_PDFIUM_LIB").is_none() {
-                if let Ok(res) = app.path().resource_dir() {
+                if let Some(res) = &resources {
                     let dir = res.join("pdfium");
                     for name in ["libpdfium.dylib", "libpdfium.so", "pdfium.dll"] {
                         let lib = dir.join(name);
@@ -469,6 +494,18 @@ pub fn run() {
                             break;
                         }
                     }
+                }
+            }
+
+            // Same story for the optional Python engine. The core resolver
+            // already probes the macOS `Contents/Resources` directory, but the
+            // resource path differs per platform (Linux puts it under
+            // /usr/lib/<app>), so ask Tauri for the real one. A GUI app never
+            // inherits MARKITDOWN_PY_BIN from a shell, which is precisely why
+            // an installed app otherwise reports the engine as missing.
+            if std::env::var_os(markitdown_core::PY_BIN_ENV).is_none() {
+                if let Some(bin) = resources.as_ref().and_then(|r| find_python_engine(r)) {
+                    std::env::set_var(markitdown_core::PY_BIN_ENV, bin);
                 }
             }
             Ok(())
@@ -488,6 +525,54 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REGRESSION: this crate's release profile used to set `panic = "abort"`.
+    /// The PDF converter recovers from `pdf-extract`'s panics with
+    /// `catch_unwind`, which abort makes a no-op — so an installed (release)
+    /// build died the moment a user dropped a slightly-malformed PDF on the
+    /// window, while `tauri dev` (an unwinding profile) never reproduced it.
+    ///
+    /// Run this with `cargo test --release` to check the profile that ships.
+    #[test]
+    fn panic_strategy_is_unwind() {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(|| panic!("probe"));
+        std::panic::set_hook(prev);
+        assert!(
+            result.is_err(),
+            "panic must unwind in this profile, or malformed PDFs abort the app"
+        );
+    }
+
+    #[test]
+    fn bundled_python_engine_is_found_in_both_layouts() {
+        // The desktop app bundles the engine as a Tauri resource. Both
+        // PyInstaller layouts must resolve, or an installed app reports the
+        // Python engine as missing even though it shipped with one.
+        let root = std::env::temp_dir().join(format!("md-res-{}", std::process::id()));
+        let onedir = root.join("python-engine").join("markitdown-py");
+        std::fs::create_dir_all(&onedir).unwrap();
+        assert!(find_python_engine(&root).is_none(), "empty dir must not match");
+
+        // onedir: python-engine/markitdown-py/markitdown-py
+        std::fs::write(onedir.join("markitdown-py"), b"#!/bin/sh\n").unwrap();
+        assert_eq!(
+            find_python_engine(&root),
+            Some(onedir.join("markitdown-py")),
+            "onedir layout must resolve to the inner binary"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+
+        // onefile: python-engine/markitdown-py
+        std::fs::create_dir_all(root.join("python-engine")).unwrap();
+        let onefile = root.join("python-engine").join("markitdown-py");
+        std::fs::write(&onefile, b"#!/bin/sh\n").unwrap();
+        assert_eq!(find_python_engine(&root), Some(onefile));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn job_status_serializes_lowercase() {

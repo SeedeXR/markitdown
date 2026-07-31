@@ -77,29 +77,46 @@ fn normalize_bin(p: PathBuf) -> Option<PathBuf> {
     None
 }
 
-/// Look for the engine next to the current executable, then on `PATH`. Both a
-/// one-file `markitdown-py` and an onedir **folder** (`markitdown-py/markitdown-py`)
-/// are recognized, so dropping either next to the app — or a Tauri sidecar —
-/// is auto-discovered.
-fn discover_python_bin() -> Option<PathBuf> {
-    fn in_dir(dir: &std::path::Path) -> Option<PathBuf> {
-        // one-file binary directly in `dir`
-        let one = dir.join(PY_BIN_NAME);
+/// Both a one-file `markitdown-py` and an onedir **folder**
+/// (`markitdown-py/markitdown-py`) count as a hit, so either PyInstaller build
+/// mode is discovered — directly in `dir` or under a `python-engine/`
+/// subdirectory, which is how the desktop app bundles it.
+fn in_dir(dir: &std::path::Path) -> Option<PathBuf> {
+    for base in [dir.to_path_buf(), dir.join("python-engine")] {
+        // one-file binary directly in `base`
+        let one = base.join(PY_BIN_NAME);
         if one.is_file() {
             return Some(one);
         }
-        // onedir layout: `dir/markitdown-py/markitdown-py[.exe]`
-        let onedir = dir.join("markitdown-py").join(PY_BIN_NAME);
+        // onedir layout: `base/markitdown-py/markitdown-py[.exe]`
+        let onedir = base.join("markitdown-py").join(PY_BIN_NAME);
         if onedir.is_file() {
             return Some(onedir);
         }
-        None
     }
+    None
+}
 
+/// Look for the engine next to the current executable, inside the surrounding
+/// application bundle, on `PATH`, and finally in the standard install prefixes.
+///
+/// The last two steps exist because of how *installed* apps actually run. A GUI
+/// app launched from Finder, the Dock or a desktop entry — and an MCP server
+/// spawned by a host like Claude Desktop — does **not** inherit the user's
+/// shell environment: no `MARKITDOWN_PY_BIN`, and a `PATH` of little more than
+/// `/usr/bin:/bin`. An engine sitting in `/usr/local/bin` or `~/.local/bin` is
+/// therefore invisible to exactly the builds that need it most, which is why
+/// those directories are probed explicitly rather than left to `PATH`.
+fn discover_python_bin() -> Option<PathBuf> {
     // Next to the running binary (side-by-side CLI install / Tauri sidecar).
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             if let Some(p) = in_dir(dir) {
+                return Some(p);
+            }
+            // macOS app bundle: the executable lives in `Contents/MacOS/`,
+            // while bundled resources land in `Contents/Resources/`.
+            if let Some(p) = dir.parent().and_then(|c| in_dir(&c.join("Resources"))) {
                 return Some(p);
             }
         }
@@ -112,7 +129,42 @@ fn discover_python_bin() -> Option<PathBuf> {
             }
         }
     }
-    None
+    install_prefixes().iter().find_map(|d| in_dir(d))
+}
+
+/// Standard locations an engine may have been installed into, probed because a
+/// GUI/MCP process cannot see them via `PATH`. Order is most- to least-specific.
+fn install_prefixes() -> Vec<PathBuf> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from);
+    let mut dirs = Vec::new();
+
+    if let Some(home) = &home {
+        // Where install-mcp.sh / install-mcp.ps1 place the engine.
+        dirs.push(home.join(".local").join("share").join("markitdown"));
+        dirs.push(home.join(".local").join("bin"));
+        if cfg!(target_os = "macos") {
+            dirs.push(
+                home.join("Library")
+                    .join("Application Support")
+                    .join("markitdown"),
+            );
+        }
+    }
+    if cfg!(windows) {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            dirs.push(local.join("markitdown"));
+            dirs.push(local.join("Programs").join("markitdown"));
+        }
+    } else {
+        if cfg!(target_os = "macos") {
+            dirs.push(PathBuf::from("/opt/homebrew/bin"));
+            dirs.push(PathBuf::from("/Applications/MarkItDown.app/Contents/Resources"));
+        }
+        dirs.push(PathBuf::from("/usr/local/bin"));
+        dirs.push(PathBuf::from("/usr/local/share/markitdown"));
+    }
+    dirs
 }
 
 /// True when a usable Python fallback binary is configured.

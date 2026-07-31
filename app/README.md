@@ -61,13 +61,38 @@ Structured formats are translated to Markdown, not flattened to plain text:
 | **XLSX/XLS** | `## <sheet>` per sheet | — | each sheet → GFM table | — |
 | **PPTX** | title placeholder → `#` | (run styles) | `a:tbl` → GFM table | `<!-- Slide N -->`, image alt, notes, charts |
 | **HTML/EPUB** | `<h1–6>` → `#` | `<b>/<strong>`, `<i>/<em>` | `<table>` → GFM | lists, links, blockquotes |
-| **PDF** | — (text only) | — | — | linear text; *with the optional Python engine, pdfplumber reconstructs tables* |
+| **PDF** | font size vs body → `#`–`#####` | **PDFium backend only** | aligned columns → GFM table | paragraphs re-flowed, lists, column reading order, running heads dropped |
 
-PDF carries no semantic structure (no real "heading"/"bold" markup), so the
-pure-Rust and PDFium paths extract clean linear text; table reconstruction comes
-from the Python engine (pdfplumber). DOCX/XLSX/PPTX/HTML/EPUB have real structure
-and are translated faithfully (verified by `tests/formatting.rs`, including a
-synthetic bold/italic/heading/table DOCX).
+PDF is the odd one out: the format stores positioned glyphs, not structure —
+there is no "heading" or "bold" markup to read. Both backends therefore emit
+positioned glyphs and `converters/pdf_layout.rs` **reconstructs** structure from
+geometry and font metrics:
+
+- **headings** — line font size relative to the document's modal ("body") size
+- **tables** — runs of consecutive lines whose cells overlap in columns, with a
+  cell-length guard so two-column prose is not mistaken for a table
+- **bold / italic** — from font weight and style flags. Only **PDFium** exposes
+  these; `pdf-extract`'s `OutputDev` never passes the font down, so the
+  pure-Rust path gets every other feature but no emphasis. (Release artifacts
+  build with PDFium, so shipped binaries do detect bold.)
+- **lists** — bullet and numbered prefixes, indented by x offset
+- **paragraphs** — wrapped lines re-joined with de-hyphenation, split on
+  vertical gaps
+- **reading order** — a two-column page is emitted column by column, not
+  interleaved line by line
+- **running heads/feet** — text repeating at the top/bottom of most pages is
+  dropped
+
+Known limits: text rotated 90° (chart axis labels in infographics) is placed by
+baseline like everything else, so it scatters rather than reading as a label;
+and a table whose rows are single characters at uniform spacing is
+indistinguishable from tracked-out display type.
+
+DOCX/XLSX/PPTX/HTML/EPUB have real structure and are translated faithfully
+(verified by `tests/formatting.rs`, including a synthetic
+bold/italic/heading/table DOCX). The PDF layout rules have their own unit tests
+in `pdf_layout.rs` and malformed-input regression tests in
+`tests/pdf_malformed.rs`.
 
 ## Performance & progress (heavy files)
 

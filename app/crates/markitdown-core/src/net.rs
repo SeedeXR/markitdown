@@ -108,9 +108,20 @@ impl Resolver for SafeResolver {
     }
 }
 
+/// Redirect hops allowed before a fetch is abandoned. Enough for the usual
+/// http→https→www→canonical chain, low enough that a redirect loop fails fast
+/// with a clear error instead of burning the whole request timeout.
+const MAX_REDIRECTS: u32 = 10;
+
 fn config() -> Config {
     Config::builder()
         .timeout_global(Some(Duration::from_secs(TIMEOUT_SECS)))
+        .max_redirects(MAX_REDIRECTS)
+        // Surface "too many redirects" as an error rather than handing back
+        // the last 3xx response as if it were the document.
+        .max_redirects_will_error(true)
+        // Never replay Authorization onto a host we were redirected to.
+        .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
         .build()
 }
 

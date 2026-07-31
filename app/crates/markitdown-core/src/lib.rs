@@ -44,7 +44,7 @@ pub use llm_caption::available as llm_caption_available;
 pub use llm_providers::{provider as llm_provider, LlmProvider, LLM_PROVIDERS};
 pub use options::{ConvertOptions, Engine, LlmConfig};
 pub use progress::{Progress, ProgressCallback};
-pub use python_engine::python_engine_available;
+pub use python_engine::{python_engine_available, PY_BIN_ENV};
 pub use result::ConvertResult;
 pub use stream_info::StreamInfo;
 
